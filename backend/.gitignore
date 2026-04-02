@@ -1,0 +1,16 @@
+# Dépendances
+node_modules/
+
+# Variables d'environnement
+.env
+.env.local
+
+# Base de données SQLite locale
+prisma/dev.db
+prisma/dev.db-journal
+
+# Prisma generated
+generated/
+
+# Logs
+*.log
