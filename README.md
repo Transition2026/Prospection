@@ -47,6 +47,8 @@ Le fichier `.env` contient les clés API qui permettent à l'application de fonc
 
 ### Comment créer ce fichier :
 
+Assure toi d'avoir Visual Studio Code d'installé
+
 1. Ouvre le dossier `backend` dans le projet
 2. Fais un clic droit dans le dossier → **Nouveau** → **Document texte**
 3. Nomme-le exactement `.env` *(avec un point au début, sans `.txt` à la fin)*
