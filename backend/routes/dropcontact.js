@@ -75,17 +75,32 @@ router.post('/enrich', async (req, res) => {
       const contact = pollData.data?.[0];
       const emails = contact?.email || [];
 
+      // Log complet pour debug
+      console.log('Dropcontact contact complet:', JSON.stringify(contact, null, 2));
+
       if (emails.length === 0) {
-        return res.json({ found: false, email: null, score: null });
+        return res.json({ found: false, email: null, score: null, telephone: null });
       }
 
       // Prendre le premier email (Dropcontact les trie par confiance)
       const best = emails[0];
+
+      // Le champ téléphone peut être sous plusieurs formes selon l'API Dropcontact
+      let telephone = null;
+      const phonesRaw = contact?.phone ?? contact?.phones ?? contact?.telephone ?? null;
+      if (typeof phonesRaw === 'string' && phonesRaw.length > 0) {
+        telephone = phonesRaw;
+      } else if (Array.isArray(phonesRaw) && phonesRaw.length > 0) {
+        const first = phonesRaw[0];
+        telephone = first?.number ?? first?.phone ?? first?.value ?? (typeof first === 'string' ? first : null);
+      }
+
       return res.json({
         found: true,
         email: best.email,
         score: qualificationToScore(best.qualification),
         qualification: best.qualification || '',
+        telephone,
       });
     }
 

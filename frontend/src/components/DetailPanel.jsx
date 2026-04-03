@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { findWebsiteWithClaude, findNewsWithBrave } from '../services/api';
+import { findWebsiteWithClaude, findRHContact } from '../services/api';
 
 const TAILLE_LABELS = {
   NN: '0 salarié',
@@ -42,8 +42,8 @@ function Field({ label, value }) {
 export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise }) {
   const [findingWebsite, setFindingWebsite] = useState(false);
   const [websiteError, setWebsiteError] = useState(null);
-  const [findingNews, setFindingNews] = useState(false);
-  const [newsError, setNewsError] = useState(null);
+  const [findingRH, setFindingRH] = useState(false);
+  const [rhError, setRhError] = useState(null);
 
   // Fermer avec Escape
   useEffect(() => {
@@ -87,25 +87,21 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
     }
   }
 
-  async function handleFindNews() {
-    setFindingNews(true);
-    setNewsError(null);
+
+  async function handleFindRH() {
+    setFindingRH(true);
+    setRhError(null);
     try {
-      const result = await findNewsWithBrave({
-        nom: e.nom_entreprise,
-        ville: e.ville,
-        siren: e.siren,
-        site_web: e.site_web,
-      });
+      const result = await findRHContact({ nom: e.nom_entreprise, ville: e.ville });
       if (result.found && onUpdateEntreprise) {
-        onUpdateEntreprise(e.siren, { actu: result.actu });
+        onUpdateEntreprise(e.siren, { contact_rh: result.contact_rh });
       } else if (!result.found) {
-        setNewsError('Aucune actualité trouvée');
+        setRhError('Aucun contact RH trouvé');
       }
     } catch (err) {
-      setNewsError(err.message);
+      setRhError(err.message);
     } finally {
-      setFindingNews(false);
+      setFindingRH(false);
     }
   }
 
@@ -150,24 +146,40 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
             <div className={`rounded-xl p-4 border ${e.email ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
               <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Email de contact</p>
               {e.email ? (
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-mono text-gray-800 break-all">{e.email}</span>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {e.score !== null && e.score !== undefined && (
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${scoreColor}`}>
-                        {e.score}%
-                      </span>
-                    )}
-                    <button
-                      onClick={copyEmail}
-                      className="px-3 py-1.5 bg-white border border-green-300 text-green-700 hover:bg-green-50 text-xs font-medium rounded-lg transition-colors flex items-center gap-1"
-                    >
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      Copier
-                    </button>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-mono text-gray-800 break-all">{e.email}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {e.score !== null && e.score !== undefined && (
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${scoreColor}`}>
+                          {e.score}%
+                        </span>
+                      )}
+                      <button
+                        onClick={copyEmail}
+                        className="px-3 py-1.5 bg-white border border-green-300 text-green-700 hover:bg-green-50 text-xs font-medium rounded-lg transition-colors flex items-center gap-1"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        Copier
+                      </button>
+                    </div>
                   </div>
+                  {e.telephone && (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-mono text-gray-700">{e.telephone}</span>
+                      <button
+                        onClick={() => copyText(e.telephone)}
+                        className="px-3 py-1.5 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-xs font-medium rounded-lg transition-colors flex items-center gap-1"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        Copier
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-sm text-gray-400 italic">
@@ -265,34 +277,40 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
             )}
           </Section>
 
-          {/* Actualité récente */}
-          <Section title="Actualité récente">
-            {e.actu ? (
+          {/* Contact RH */}
+          <Section title="Contact RH">
+            {e.contact_rh ? (
               <div className="bg-gray-50 rounded-lg px-4 py-3 space-y-1">
-                <a
-                  href={e.actu.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm font-medium text-blue-600 hover:underline block"
-                >
-                  {e.actu.titre}
-                </a>
-                {e.actu.description && (
-                  <p className="text-xs text-gray-500 line-clamp-3">{e.actu.description}</p>
-                )}
-                <div className="flex gap-3 text-xs text-gray-400">
-                  {e.actu.source && <span>{e.actu.source}</span>}
-                  {e.actu.date && <span>{e.actu.date}</span>}
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">{e.contact_rh.nom}</p>
+                    {e.contact_rh.poste && (
+                      <p className="text-xs text-gray-500 mt-0.5">{e.contact_rh.poste}</p>
+                    )}
+                  </div>
+                  {e.contact_rh.url_linkedin && (
+                    <a
+                      href={e.contact_rh.url_linkedin}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                    >
+                      LinkedIn
+                    </a>
+                  )}
                 </div>
+                {e.contact_rh.description && (
+                  <p className="text-xs text-gray-400 line-clamp-2 mt-1">{e.contact_rh.description}</p>
+                )}
               </div>
             ) : (
               <div className="space-y-2">
                 <button
-                  onClick={handleFindNews}
-                  disabled={findingNews}
-                  className="flex items-center gap-2 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-orange-300 text-white text-sm font-medium rounded-lg transition-colors w-full justify-center"
+                  onClick={handleFindRH}
+                  disabled={findingRH}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-300 text-white text-sm font-medium rounded-lg transition-colors w-full justify-center"
                 >
-                  {findingNews ? (
+                  {findingRH ? (
                     <>
                       <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -303,14 +321,14 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
                   ) : (
                     <>
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 12h6m-6-4h2" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
                       </svg>
-                      Chercher une actualité
+                      Chercher un contact RH
                     </>
                   )}
                 </button>
-                {newsError && (
-                  <p className="text-xs text-red-500 text-center">{newsError}</p>
+                {rhError && (
+                  <p className="text-xs text-red-500 text-center">{rhError}</p>
                 )}
               </div>
             )}

@@ -19,12 +19,8 @@ export default function ExportButton({ data, selected, onExported }) {
       'ville',
       'site_web',
       'email',
+      'telephone',
       'score',
-      'actu_titre',
-      'actu_url',
-      'actu_description',
-      'actu_source',
-      'actu_date',
     ];
 
     const rows = toExport.map((e) => [
@@ -37,12 +33,8 @@ export default function ExportButton({ data, selected, onExported }) {
       e.ville || '',
       e.site_web || '',
       e.email || '',
+      e.telephone || '',
       e.score !== null && e.score !== undefined ? e.score : '',
-      e.actu?.titre || '',
-      e.actu?.url || '',
-      e.actu?.description || '',
-      e.actu?.source || '',
-      e.actu?.date || '',
     ]);
 
     // Séparateur ";" pour compatibilité Excel français

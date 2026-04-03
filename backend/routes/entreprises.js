@@ -28,9 +28,32 @@ router.get('/search', async (req, res) => {
     }
     const data = await response.json();
 
+    // Priorité des qualités dirigeants : les vrais dirigeants avant les CAC et autres
+    function prioriteDirigeant(qualite) {
+      const q = (qualite || '').toLowerCase();
+      if (q.includes('président') || q.includes('president')) return 1;
+      if (q.includes('gérant') || q.includes('gerant')) return 2;
+      if (q.includes('directeur général') || q.includes('directeur general') || q.includes('dg ') || q === 'dg') return 3;
+      if (q.includes('directeur')) return 4;
+      if (q.includes('pdg')) return 5;
+      if (q.includes('administrateur')) return 6;
+      if (q.includes('associé') || q.includes('associe')) return 7;
+      if (q.includes('commissaire aux comptes') || q.includes('commissaire aux compte')) return 99;
+      if (q.includes('commissaire')) return 98;
+      return 50;
+    }
+
     let entreprises = (data.results || []).map((e) => {
-      const dirigeant = e.dirigeants?.[0] || {};
-      const tousLesDirigeants = (e.dirigeants || []).map((d) => ({
+      const dirigeantsTries = [...(e.dirigeants || [])].sort((a, b) => {
+        // Priorité 1 : vraie personne (a un prénom) avant une société/groupe (denomination seulement)
+        const aPersonne = a.prenoms ? 0 : 1;
+        const bPersonne = b.prenoms ? 0 : 1;
+        if (aPersonne !== bPersonne) return aPersonne - bPersonne;
+        // Priorité 2 : qualité du rôle
+        return prioriteDirigeant(a.qualite) - prioriteDirigeant(b.qualite);
+      });
+      const dirigeant = dirigeantsTries[0] || {};
+      const tousLesDirigeants = dirigeantsTries.map((d) => ({
         prenoms: d.prenoms || '',
         nom: d.nom || d.denomination || '',
         qualite: d.qualite || '',

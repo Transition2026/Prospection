@@ -114,6 +114,7 @@ export default function ResultsTable({
               <th className="px-4 py-3 text-left font-medium text-gray-600">Secteur</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">CP</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Ville</th>
+              <th className="px-4 py-3 text-left font-medium text-gray-600">Site web</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Email</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Actions</th>
             </tr>
@@ -170,6 +171,21 @@ export default function ResultsTable({
                 </td>
                 <td className="px-4 py-3 text-gray-500 text-xs">{e.code_postal || '—'}</td>
                 <td className="px-4 py-3 text-gray-500 text-xs">{e.ville || '—'}</td>
+                <td className="px-4 py-3 text-xs max-w-[140px]" onClick={(ev) => ev.stopPropagation()}>
+                  {e.site_web ? (
+                    <a
+                      href={e.site_web.startsWith('http') ? e.site_web : `https://${e.site_web}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:underline truncate block"
+                      title={e.site_web}
+                    >
+                      {e.site_web.replace(/^https?:\/\//, '')}
+                    </a>
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-xs">
                   {e.emailLoading ? (
                     <svg className="animate-spin w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24">

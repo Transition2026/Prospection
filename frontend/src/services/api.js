@@ -1,4 +1,5 @@
-const BASE_URL = 'http://localhost:3001';
+// En dev Vite tourne sur :5173, en prod le backend sert tout sur :3001
+const BASE_URL = import.meta.env.PROD ? '' : 'http://localhost:3001';
 
 export async function checkStatus() {
   const res = await fetch(`${BASE_URL}/api/status`);
@@ -73,15 +74,14 @@ export async function findWebsiteWithClaude({ nom, ville, siren }) {
   return data;
 }
 
+
 /**
- * Cherche l'actualité récente d'une entreprise via Brave Search
+ * Cherche un contact RH via Brave Search (LinkedIn)
  */
-export async function findNewsWithBrave({ nom, ville, siren, site_web }) {
+export async function findRHContact({ nom, ville }) {
   const params = new URLSearchParams({ nom });
   if (ville) params.set('ville', ville);
-  if (siren) params.set('siren', siren);
-  if (site_web) params.set('site_web', site_web);
-  const res = await fetch(`${BASE_URL}/api/claude/find-news?${params.toString()}`);
+  const res = await fetch(`${BASE_URL}/api/claude/find-rh?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erreur Brave Search');
   return data;

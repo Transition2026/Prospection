@@ -4,7 +4,7 @@ import SearchForm from './components/SearchForm';
 import ResultsTable from './components/ResultsTable';
 import ExportButton from './components/ExportButton';
 import DetailPanel from './components/DetailPanel';
-import { checkStatus, searchEntreprises, enrichDropcontact, sleep, getExportedSirens, saveExportedEntreprises, resetExportedSirens } from './services/api';
+import { checkStatus, searchEntreprises, enrichDropcontact, findWebsiteWithClaude, sleep, getExportedSirens, saveExportedEntreprises, resetExportedSirens } from './services/api';
 
 const HUNTER_DELAY_MS = 300;
 
@@ -39,6 +39,8 @@ export default function App() {
   const [selected, setSelected] = useState(new Set());
   const [hunterProgress, setHunterProgress] = useState(null);
   const [hunterRunning, setHunterRunning] = useState(false);
+  const [websiteProgress, setWebsiteProgress] = useState(null);
+  const [websiteRunning, setWebsiteRunning] = useState(false);
   const [error, setError] = useState(null);
   const [tailleFilter, setTailleFilter] = useState(DEFAULT_TAILLE_FILTER);
   const [exclureGroupes, setExclureGroupes] = useState(true);
@@ -127,7 +129,7 @@ export default function App() {
     setHunterRunning(true);
     setError(null);
 
-    const toEnrich = entreprises.filter((e) => selected.has(e.siren));
+    const toEnrich = entreprises.filter((e) => selected.has(e.siren) && !e.email);
     setHunterProgress({ current: 0, total: toEnrich.length });
 
     for (let i = 0; i < toEnrich.length; i++) {
@@ -146,6 +148,7 @@ export default function App() {
             emailLoading: false,
             email: result.email,
             score: result.score,
+            telephone: result.telephone || null,
             emailStatus: 'found',
           });
         } else {
@@ -162,6 +165,29 @@ export default function App() {
     setHunterProgress(null);
     setHunterRunning(false);
   }, [selected, entreprises, hunterRunning]);
+
+  const handleFindWebsites = useCallback(async () => {
+    if (selected.size === 0 || websiteRunning) return;
+    setWebsiteRunning(true);
+
+    const toSearch = entreprises.filter((e) => selected.has(e.siren) && !e.site_web);
+    setWebsiteProgress({ current: 0, total: toSearch.length });
+
+    for (let i = 0; i < toSearch.length; i++) {
+      const e = toSearch[i];
+      try {
+        const result = await findWebsiteWithClaude({ nom: e.nom_entreprise, ville: e.ville, siren: e.siren });
+        if (result.found) {
+          updateEntreprise(e.siren, { site_web: result.site_web });
+        }
+      } catch {}
+      setWebsiteProgress({ current: i + 1, total: toSearch.length });
+      if (i < toSearch.length - 1) await sleep(500);
+    }
+
+    setWebsiteProgress(null);
+    setWebsiteRunning(false);
+  }, [selected, entreprises, websiteRunning]);
 
   function toggleSelect(siren) {
     setSelected((prev) => {
@@ -299,8 +325,34 @@ export default function App() {
                   onExported={(exported) => {
                     saveExportedEntreprises(exported).catch(() => {});
                     setExportedSirens((prev) => new Set([...prev, ...exported.map((e) => e.siren)]));
+                    setSelected(new Set());
                   }}
                 />
+
+                {selected.size > 0 && (
+                  <button
+                    onClick={handleFindWebsites}
+                    disabled={websiteRunning}
+                    className="px-5 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
+                  >
+                    {websiteRunning ? (
+                      <>
+                        <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        </svg>
+                        Sites web... ({websiteProgress?.current}/{websiteProgress?.total})
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
+                        </svg>
+                        Trouver les sites ({selected.size})
+                      </>
+                    )}
+                  </button>
+                )}
 
                 {selected.size > 0 && (
                   <button

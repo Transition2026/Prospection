@@ -52,69 +52,78 @@ router.get('/find-website', async (req, res) => {
   }
 });
 
-// GET /api/claude/find-news?nom=COMPANY&ville=CITY&siren=123&site_web=URL
-router.get('/find-news', async (req, res) => {
+// GET /api/claude/find-rh?nom=COMPANY&ville=CITY
+router.get('/find-rh', async (req, res) => {
   try {
     const apiKey = process.env.BRAVE_API_KEY;
     if (!apiKey) {
       return res.status(500).json({ error: 'BRAVE_API_KEY non configurée dans le .env' });
     }
 
-    const { nom, ville, siren, site_web } = req.query;
+    const { nom, ville } = req.query;
     if (!nom) return res.status(400).json({ error: 'Paramètre nom manquant' });
 
-    const domaine = site_web
-      ? new URL(site_web.startsWith('http') ? site_web : `https://${site_web}`).hostname
-      : null;
+    // Recherche LinkedIn de profils RH liés à l'entreprise
+    const query = `"${nom}" ${ville ? ville + ' ' : ''}Responsable RH OR DRH OR "Chargé RH" OR "Chargée RH" site:linkedin.com/in`;
 
-    // Stratégie : deux requêtes en parallèle
-    // 1. Recherche dans le site de l'entreprise (si dispo) : site:domaine.fr actualité
-    // 2. Recherche générale avec nom + siren pour précision
-    const braveHeaders = {
-      Accept: 'application/json',
-      'Accept-Encoding': 'gzip',
-      'X-Subscription-Token': apiKey,
-    };
-
-    // Requête 1 : API News Brave — actu presse/médias sur l'entreprise
-    const newsQuery = [nom, siren, ville].filter(Boolean).join(' ');
-    const newsResponse = await fetch(
-      `https://api.search.brave.com/res/v1/news/search?q=${encodeURIComponent(newsQuery)}&count=5&freshness=py`,
-      { headers: braveHeaders }
+    const response = await fetch(
+      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`,
+      {
+        headers: {
+          Accept: 'application/json',
+          'Accept-Encoding': 'gzip',
+          'X-Subscription-Token': apiKey,
+        },
+      }
     );
-    const newsData = await newsResponse.json();
-    const newsResults = newsData.results || [];
 
-    // Requête 2 : si on a le site, chercher une page actu/blog dans le site
-    let siteResults = [];
-    if (domaine) {
-      const siteResponse = await fetch(
-        `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(`site:${domaine} actualité OR news OR communiqué`)}&count=3`,
-        { headers: braveHeaders }
-      );
-      const siteData = await siteResponse.json();
-      siteResults = siteData.web?.results || [];
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data.message || 'Erreur Brave Search' });
     }
 
-    // Priorité : page du site de l'entreprise > article de presse
-    const best = siteResults[0] || newsResults[0];
+    const results = data.web?.results || [];
+    if (results.length === 0) {
+      return res.json({ found: false, contact_rh: null });
+    }
 
-    if (!best) {
-      return res.json({ found: false, actu: null });
+    // Extraire le nom depuis le titre du profil LinkedIn
+    // Format typique : "Prénom Nom - Responsable RH - Entreprise | LinkedIn"
+    const best = results[0];
+    const titre = best.title || '';
+    const description = best.description || '';
+    const url = best.url || '';
+
+    // Extraire le nom : partie avant le premier " - " ou " – " ou " | "
+    const separators = [' - ', ' – ', ' | ', ' · '];
+    let nom_rh = titre;
+    for (const sep of separators) {
+      const idx = nom_rh.indexOf(sep);
+      if (idx > 0) {
+        nom_rh = nom_rh.substring(0, idx).trim();
+        break;
+      }
+    }
+
+    // Extraire le poste : partie entre le 1er et 2ème séparateur
+    let poste_rh = '';
+    const parts = titre.split(/ - | – | \| /);
+    if (parts.length >= 2) {
+      poste_rh = parts[1].trim();
     }
 
     return res.json({
       found: true,
-      actu: {
-        titre: best.title || '',
-        url: best.url || '',
-        description: best.description || '',
-        date: best.age || best.page_age || '',
-        source: best.meta_url?.hostname || best.source?.name || '',
+      contact_rh: {
+        nom: nom_rh,
+        poste: poste_rh,
+        url_linkedin: url,
+        description,
       },
     });
   } catch (err) {
-    console.error('Erreur /api/claude/find-news:', err.message);
+    console.error('Erreur /api/claude/find-rh:', err.message);
     res.status(500).json({ error: err.message || 'Erreur interne du serveur' });
   }
 });
