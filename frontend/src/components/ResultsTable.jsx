@@ -1,32 +1,29 @@
-function TailleBadge({ tranche }) {
-  if (!tranche) {
-    return (
-      <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium border bg-yellow-50 text-yellow-600 border-yellow-200">
-        ?
-      </span>
-    );
-  }
-  const PETITE = ['NN', '00', '01', '02', '03'];
-  const MOYENNE = ['11', '12'];
-  const GRANDE = ['21', '22'];
+const TRANCHES_MICRO = ['NN', '00', '01', '02', '03'];
+const TRANCHES_PME = ['11', '12', '21', '22', '31'];
 
-  if (PETITE.includes(tranche)) {
-    return (
-      <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium border bg-gray-100 text-gray-500 border-gray-200">
-        Micro
-      </span>
-    );
-  }
-  if (MOYENNE.includes(tranche) || GRANDE.includes(tranche)) {
-    return (
-      <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium border bg-green-50 text-green-600 border-green-200">
-        PME
-      </span>
-    );
-  }
+function tranchToCategorie(tranche) {
+  if (!tranche) return 'micro';
+  if (TRANCHES_MICRO.includes(tranche)) return 'micro';
+  if (TRANCHES_PME.includes(tranche)) return 'pme';
+  return 'grande';
+}
+
+const CATEGORIE_STYLE = {
+  micro: { label: 'Micro', cls: 'bg-gray-100 text-gray-500 border-gray-200' },
+  pme: { label: 'PME', cls: 'bg-green-50 text-green-600 border-green-200' },
+  grande: { label: 'Grande', cls: 'bg-orange-50 text-orange-600 border-orange-200' },
+};
+
+function TailleBadge({ categorie, tranche, source }) {
+  const cat = categorie || tranchToCategorie(tranche);
+  const style = CATEGORIE_STYLE[cat];
   return (
-    <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium border bg-orange-50 text-orange-600 border-orange-200">
-      Grande
+    <span
+      className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium border ${style.cls}`}
+      title={source === 'gpt' ? 'Catégorie corrigée par IA' : undefined}
+    >
+      {style.label}
+      {source === 'gpt' && <span className="ml-1 opacity-60">✨</span>}
     </span>
   );
 }
@@ -156,15 +153,35 @@ export default function ResultsTable({
                   )}
                 </td>
                 <td className="px-4 py-3 text-gray-600">
-                  {e.prenom_dirigeant || e.nom_dirigeant
-                    ? `${e.prenom_dirigeant || ''} ${e.nom_dirigeant || ''}`.trim()
-                    : <span className="text-gray-300">—</span>}
+                  {e.dirigeantResolving ? (
+                    <span className="flex items-center gap-2 text-gray-400 text-xs italic">
+                      <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      Remontée en cours…
+                    </span>
+                  ) : e.prenom_dirigeant || e.nom_dirigeant ? (
+                    <div className="flex flex-col">
+                      <span>{`${e.prenom_dirigeant || ''} ${e.nom_dirigeant || ''}`.trim()}</span>
+                      {e.dirigeant_remontees > 0 && (
+                        <span
+                          className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 self-start"
+                          title={`Le président de l'entreprise était une personne morale — remonté ${e.dirigeant_remontees} niveau${e.dirigeant_remontees > 1 ? 'x' : ''}`}
+                        >
+                          ↑ Remonté {e.dirigeant_remontees} entreprise{e.dirigeant_remontees > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
                 </td>
                 <td className="px-4 py-3 text-gray-500 text-xs">
                   {e.qualite_dirigeant || <span className="text-gray-300">—</span>}
                 </td>
                 <td className="px-4 py-3">
-                  <TailleBadge tranche={e.tranche_effectif} />
+                  <TailleBadge categorie={e.categorie} tranche={e.tranche_effectif} source={e.categorie_source} />
                 </td>
                 <td className="px-4 py-3 text-gray-500 text-xs max-w-[120px] truncate">
                   {e.libelle_code_naf || <span className="text-gray-300">—</span>}

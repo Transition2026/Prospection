@@ -2,7 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(npm install:*)",
-      "Bash(npx prisma:*)"
+      "Bash(npx prisma:*)",
+      "Bash(git -C /Users/abelmillecamps/Desktop/Prospection log --oneline)",
+      "Bash(wc -l /Users/abelmillecamps/Desktop/Prospection/frontend/src/components/*.jsx)",
+      "Bash(git -C /Users/abelmillecamps/Desktop/Prospection config --get remote.origin.url)",
+      "Bash(git restore *)",
+      "Bash(npm -v)",
+      "Bash(curl -s \"https://recherche-entreprises.api.gouv.fr/search?q=433466570&per_page=1\")",
+      "Bash(curl -s \"https://recherche-entreprises.api.gouv.fr/search?q=holding&per_page=5&departement=59\")",
+      "Bash(curl -s \"https://recherche-entreprises.api.gouv.fr/search?q=groupe&per_page=25&departement=59&nature_juridique=5710\")",
+      "Bash(curl -s 'https://recherche-entreprises.api.gouv.fr/search?q=__TRACKED_VAR__&per_page=1')",
+      "Bash(curl -s \"http://localhost:3001/api/entreprises/dirigeant-reel?siren=451489017\")",
+      "Bash(curl -s \"http://localhost:3001/api/entreprises/dirigeant-reel?siren=528570229\")"
     ]
   }
 }

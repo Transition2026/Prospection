@@ -21,15 +21,13 @@ const SECTEURS = [
   { value: '', label: 'Tous secteurs' },
 ];
 
-const TAILLE_OPTIONS = [
-  { key: 'non_renseignee', label: 'Non renseignée (inclure quand même)' },
-  { key: 'petite', label: 'Moins de 10 salariés' },
-  { key: 'moyenne', label: '10 à 49 salariés' },
-  { key: 'grande', label: '50 à 199 salariés' },
-  { key: 'tres_grande', label: '200 salariés et plus' },
+const CATEGORY_OPTIONS = [
+  { key: 'micro', label: 'Micro', sublabel: '< 10 salariés' },
+  { key: 'pme', label: 'PME', sublabel: '10 à 249 salariés' },
+  { key: 'grande', label: 'Grande', sublabel: '250+ salariés' },
 ];
 
-export default function SearchForm({ onSearch, loading, tailleFilter, onTailleChange, exclureGroupes, onExclureGroupesChange, exclureDejaExportes, onExclureDejaExportesChange, exportedCount, onResetExports }) {
+export default function SearchForm({ onSearch, loading, categoryFilter, onCategoryChange, exclureGroupes, onExclureGroupesChange, exclureDejaExportes, onExclureDejaExportesChange, exportedCount, onResetExports }) {
   const [geoMode, setGeoMode] = useState('departement');
   const [selectedDepts, setSelectedDepts] = useState(['59']);
   const [codePostal, setCodePostal] = useState('');
@@ -154,29 +152,38 @@ export default function SearchForm({ onSearch, loading, tailleFilter, onTailleCh
         </div>
       </div>
 
-      {/* Taille d'entreprise */}
+      {/* Catégorie d'entreprise */}
       <div>
         <h2 className="text-base font-semibold text-gray-700 mb-3 flex items-center gap-2">
           <span className="w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs font-bold">3</span>
-          Taille d'entreprise
+          Catégorie d'entreprise
         </h2>
-        <div className="flex flex-wrap gap-x-6 gap-y-2 mb-2">
-          {TAILLE_OPTIONS.map((opt) => (
-            <label key={opt.key} className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={tailleFilter[opt.key]}
-                onChange={(e) =>
-                  onTailleChange((prev) => ({ ...prev, [opt.key]: e.target.checked }))
+        <div className="flex flex-wrap gap-2 mb-2">
+          {CATEGORY_OPTIONS.map((opt) => {
+            const active = !!categoryFilter[opt.key];
+            return (
+              <button
+                type="button"
+                key={opt.key}
+                onClick={() =>
+                  onCategoryChange((prev) => ({ ...prev, [opt.key]: !prev[opt.key] }))
                 }
-                className="accent-blue-600 w-4 h-4"
-              />
-              <span className="text-sm text-gray-600">{opt.label}</span>
-            </label>
-          ))}
+                className={`px-4 py-2 rounded-full text-sm border transition-colors ${
+                  active
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'
+                }`}
+              >
+                <span className="font-medium">{opt.label}</span>
+                <span className={`ml-2 text-xs ${active ? 'text-blue-100' : 'text-gray-400'}`}>
+                  {opt.sublabel}
+                </span>
+              </button>
+            );
+          })}
         </div>
         <p className="text-xs text-gray-400">
-          ℹ️ La taille n'est pas renseignée pour environ 50% des entreprises, notamment les plus récentes.
+          ℹ️ Les entreprises classées "Micro" par leur effectif sont re-vérifiées automatiquement par IA (ex : filiales sans salariés de grands groupes).
         </p>
       </div>
 

@@ -1,6 +1,15 @@
 // En dev Vite tourne sur :5173, en prod le backend sert tout sur :3001
 const BASE_URL = import.meta.env.PROD ? '' : 'http://localhost:3001';
 
+export class RateLimitError extends Error {
+  constructor(message, retryAfter) {
+    super(message || 'Rate limit atteint');
+    this.name = 'RateLimitError';
+    this.isRateLimit = true;
+    this.retryAfter = Number(retryAfter) || 10;
+  }
+}
+
 export async function checkStatus() {
   const res = await fetch(`${BASE_URL}/api/status`);
   return res.json();
@@ -37,8 +46,9 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
       if (dept) query.set('departement', dept);
       if (sect) query.set('section', sect);
       return fetch(`${BASE_URL}/api/entreprises/search?${query.toString()}`)
-        .then((r) => r.json())
-        .then((d) => {
+        .then(async (r) => {
+          const d = await r.json();
+          if (r.status === 429) throw new RateLimitError(d.error, d.retry_after);
           if (d.error) throw new Error(d.error);
           return d.entreprises || [];
         });
@@ -62,11 +72,23 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
 }
 
 /**
+ * Remonte l'arbre des dirigeants pour une entreprise dont le président est une personne morale,
+ * jusqu'à trouver une vraie personne physique (max 5 niveaux).
+ */
+export async function getDirigeantReel(siren) {
+  const res = await fetch(`${BASE_URL}/api/entreprises/dirigeant-reel?siren=${encodeURIComponent(siren)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Erreur remontée dirigeant');
+  return data;
+}
+
+/**
  * Trouve le site web d'une entreprise via Claude (web search)
  */
-export async function findWebsiteWithClaude({ nom, ville, siren }) {
+export async function findWebsiteWithClaude({ nom, ville, code_postal, siren }) {
   const params = new URLSearchParams({ nom });
   if (ville) params.set('ville', ville);
+  if (code_postal) params.set('code_postal', code_postal);
   if (siren) params.set('siren', siren);
   const res = await fetch(`${BASE_URL}/api/claude/find-website?${params.toString()}`);
   const data = await res.json();
@@ -78,9 +100,10 @@ export async function findWebsiteWithClaude({ nom, ville, siren }) {
 /**
  * Cherche un contact RH via Brave Search (LinkedIn)
  */
-export async function findRHContact({ nom, ville }) {
+export async function findRHContact({ nom, ville, code_postal }) {
   const params = new URLSearchParams({ nom });
   if (ville) params.set('ville', ville);
+  if (code_postal) params.set('code_postal', code_postal);
   const res = await fetch(`${BASE_URL}/api/claude/find-rh?${params.toString()}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erreur Brave Search');
@@ -99,6 +122,39 @@ export async function enrichDropcontact({ prenom, nom, entreprise, site_web }) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erreur Dropcontact');
   return data;
+}
+
+/**
+ * Classification batch d'entreprises via GPT (Micro/PME/Grande)
+ * @param {Array<{nom: string, ville?: string}>} entreprises
+ * @returns {Promise<Array<'pme'|'grande'|'non'>>}
+ */
+export async function classifyEntreprises(entreprises) {
+  const res = await fetch(`${BASE_URL}/api/claude/classify-entreprises`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entreprises }),
+  });
+  const data = await res.json();
+  if (res.status === 429) throw new RateLimitError(data.error, data.retry_after);
+  if (!res.ok) throw new Error(data.error || 'Erreur classification');
+  return data.classifications;
+}
+
+/**
+ * Génère un email de prospection personnalisé via GPT en utilisant le contenu
+ * de la page d'accueil du site comme contexte.
+ */
+export async function composeEmail({ nom_entreprise, site_web, nom_dirigeant }) {
+  const res = await fetch(`${BASE_URL}/api/claude/compose-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nom_entreprise, site_web, nom_dirigeant }),
+  });
+  const data = await res.json();
+  if (res.status === 429) throw new RateLimitError(data.error, data.retry_after);
+  if (!res.ok) throw new Error(data.error || 'Erreur génération email');
+  return data.email;
 }
 
 export async function getExportedSirens() {
