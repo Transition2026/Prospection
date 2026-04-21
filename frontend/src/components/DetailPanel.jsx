@@ -73,6 +73,7 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
       const result = await findWebsiteWithClaude({
         nom: e.nom_entreprise,
         ville: e.ville,
+        code_postal: e.code_postal,
         siren: e.siren,
       });
       if (result.found && onUpdateEntreprise) {
@@ -92,7 +93,7 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
     setFindingRH(true);
     setRhError(null);
     try {
-      const result = await findRHContact({ nom: e.nom_entreprise, ville: e.ville });
+      const result = await findRHContact({ nom: e.nom_entreprise, ville: e.ville, code_postal: e.code_postal });
       if (result.found && onUpdateEntreprise) {
         onUpdateEntreprise(e.siren, { contact_rh: result.contact_rh });
       } else if (!result.found) {

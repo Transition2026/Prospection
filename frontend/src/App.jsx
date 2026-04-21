@@ -4,32 +4,30 @@ import SearchForm from './components/SearchForm';
 import ResultsTable from './components/ResultsTable';
 import ExportButton from './components/ExportButton';
 import DetailPanel from './components/DetailPanel';
-import { checkStatus, searchEntreprises, enrichDropcontact, findWebsiteWithClaude, sleep, getExportedSirens, saveExportedEntreprises, resetExportedSirens } from './services/api';
+import CsvProcessor from './components/CsvProcessor';
+import { checkStatus, searchEntreprises, enrichDropcontact, findWebsiteWithClaude, getDirigeantReel, sleep, getExportedSirens, saveExportedEntreprises, resetExportedSirens, classifyEntreprises, RateLimitError } from './services/api';
 
 const HUNTER_DELAY_MS = 300;
+const DIRIGEANT_DELAY_MS = 300;
+const GPT_CLASSIFY_BATCH = 20;
+const AUTO_LOAD_MAX_PAGES = 10;
+const AUTO_LOAD_MAX_TOTAL = 500;
 
-const TAILLE_TRANCHES = {
-  non_renseignee: ['', null, undefined],
-  petite: ['NN', '00', '01', '02', '03'],
-  moyenne: ['11', '12'],
-  grande: ['21', '22'],
-  tres_grande: ['31', '32', '41', '42', '51', '52', '53'],
-};
+// Codes INSEE → catégorie (Micro <10, PME 10-249, Grande 250+)
+const TRANCHES_MICRO = ['NN', '00', '01', '02', '03'];
+const TRANCHES_PME = ['11', '12', '21', '22', '31'];
 
-function getTranche(tranche_effectif) {
-  if (!tranche_effectif) return 'non_renseignee';
-  if (TAILLE_TRANCHES.petite.includes(tranche_effectif)) return 'petite';
-  if (TAILLE_TRANCHES.moyenne.includes(tranche_effectif)) return 'moyenne';
-  if (TAILLE_TRANCHES.grande.includes(tranche_effectif)) return 'grande';
-  return 'tres_grande';
+function getCategorieFromTranche(tranche_effectif) {
+  if (!tranche_effectif) return 'micro'; // non renseigné → traité comme Micro par défaut, GPT vérifiera
+  if (TRANCHES_MICRO.includes(tranche_effectif)) return 'micro';
+  if (TRANCHES_PME.includes(tranche_effectif)) return 'pme';
+  return 'grande';
 }
 
-const DEFAULT_TAILLE_FILTER = {
-  non_renseignee: true,
-  petite: true,
-  moyenne: true,
-  grande: true,
-  tres_grande: false,
+const DEFAULT_CATEGORY_FILTER = {
+  micro: true,
+  pme: true,
+  grande: false,
 };
 
 export default function App() {
@@ -42,7 +40,7 @@ export default function App() {
   const [websiteProgress, setWebsiteProgress] = useState(null);
   const [websiteRunning, setWebsiteRunning] = useState(false);
   const [error, setError] = useState(null);
-  const [tailleFilter, setTailleFilter] = useState(DEFAULT_TAILLE_FILTER);
+  const [categoryFilter, setCategoryFilter] = useState(DEFAULT_CATEGORY_FILTER);
   const [exclureGroupes, setExclureGroupes] = useState(true);
   const [exportedSirens, setExportedSirens] = useState(new Set());
   const [exclureDejaExportes, setExclureDejaExportes] = useState(true);
@@ -51,13 +49,17 @@ export default function App() {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [lastSearchParams, setLastSearchParams] = useState(null);
+  const [pauseInfo, setPauseInfo] = useState(null); // { source, remaining } quand en pause rate-limit
 
-  const filteredEntreprises = entreprises.filter((e) => {
-    if (!tailleFilter[getTranche(e.tranche_effectif)]) return false;
+  const passesFilters = useCallback((e) => {
+    const cat = e.categorie || getCategorieFromTranche(e.tranche_effectif);
+    if (!categoryFilter[cat]) return false;
     if (exclureGroupes && e.nb_etablissements > 35) return false;
     if (exclureDejaExportes && exportedSirens.has(e.siren)) return false;
     return true;
-  });
+  }, [categoryFilter, exclureGroupes, exclureDejaExportes, exportedSirens]);
+
+  const filteredEntreprises = entreprises.filter(passesFilters);
   const masquees = entreprises.length - filteredEntreprises.length;
 
   useEffect(() => {
@@ -79,6 +81,122 @@ export default function App() {
     );
   }
 
+  // Exécute fn ; si rate limit, attend (avec countdown) et retente automatiquement
+  const withRateLimitRetry = useCallback(async (fn, source) => {
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (!err.isRateLimit) throw err;
+        for (let i = err.retryAfter; i > 0; i--) {
+          setPauseInfo({ source, remaining: i });
+          await sleep(1000);
+        }
+        setPauseInfo(null);
+      }
+    }
+  }, []);
+
+  // Vérifie avec GPT si des entreprises classées Micro sont en réalité PME/Grande.
+  // Met à jour le state + retourne la liste avec les corrections GPT appliquées.
+  const verifyCategoriesWithGPT = useCallback(async (liste) => {
+    const toCheck = liste.filter((e) => {
+      const cat = e.categorie || getCategorieFromTranche(e.tranche_effectif);
+      return cat === 'micro';
+    });
+    if (toCheck.length === 0) return liste;
+
+    const overrides = new Map();
+    for (let i = 0; i < toCheck.length; i += GPT_CLASSIFY_BATCH) {
+      const chunk = toCheck.slice(i, i + GPT_CLASSIFY_BATCH);
+      try {
+        const classifications = await withRateLimitRetry(
+          () => classifyEntreprises(chunk.map((e) => ({ nom: e.nom_entreprise, ville: e.ville }))),
+          'OpenAI'
+        );
+        chunk.forEach((e, idx) => {
+          const cat = classifications[idx];
+          if (cat === 'pme' || cat === 'grande') {
+            overrides.set(e.siren, { categorie: cat, categorie_source: 'gpt' });
+            updateEntreprise(e.siren, { categorie: cat, categorie_source: 'gpt' });
+          }
+        });
+      } catch {
+        // Erreur non-rate-limit : on garde la classification par effectif
+      }
+    }
+    return liste.map((e) => (overrides.has(e.siren) ? { ...e, ...overrides.get(e.siren) } : e));
+  }, [withRateLimitRetry]);
+
+  // Remonte l'arbre pour les entreprises dont le dirigeant affiché est une personne morale
+  const resolveDirigeants = useCallback(async (nouvelles) => {
+    const aRemonter = nouvelles.filter((e) => !e.prenom_dirigeant && e.nom_dirigeant);
+    for (let i = 0; i < aRemonter.length; i++) {
+      const e = aRemonter[i];
+      updateEntreprise(e.siren, { dirigeantResolving: true });
+      try {
+        const result = await getDirigeantReel(e.siren);
+        if (result.found) {
+          updateEntreprise(e.siren, {
+            dirigeantResolving: false,
+            prenom_dirigeant: result.prenom,
+            nom_dirigeant: result.nom,
+            qualite_dirigeant: result.qualite,
+            dirigeant_remontees: result.remontees,
+          });
+        } else {
+          updateEntreprise(e.siren, { dirigeantResolving: false });
+        }
+      } catch {
+        updateEntreprise(e.siren, { dirigeantResolving: false });
+      }
+      if (i < aRemonter.length - 1) await sleep(DIRIGEANT_DELAY_MS);
+    }
+  }, []);
+
+  // Boucle de chargement auto : fetch page par page, attend GPT après chaque, s'arrête
+  // quand on a atteint targetFiltered entreprises passant les filtres OU cap atteint.
+  const loadPagesUntilTarget = useCallback(async (params, startPage, startList, targetFiltered) => {
+    let accumule = [...startList];
+    let page = startPage;
+    let more = true;
+    const MAX_PAGE_FETCH = startPage + AUTO_LOAD_MAX_PAGES - 1;
+
+    while (more && page <= MAX_PAGE_FETCH && accumule.length < AUTO_LOAD_MAX_TOTAL) {
+      const existingSirens = new Set(accumule.map((e) => e.siren));
+      const { entreprises: nouvelles, hasMore: m } = await withRateLimitRetry(
+        () => searchEntreprises(params, page, existingSirens),
+        'data.gouv'
+      );
+
+      if (nouvelles.length === 0) {
+        more = m;
+        break;
+      }
+
+      const tagged = nouvelles.map((e) => ({ ...e, categorie: getCategorieFromTranche(e.tranche_effectif) }));
+      accumule = [...accumule, ...tagged];
+      // Append au lieu d'écraser : préserve les updates asynchrones (dirigeants etc.)
+      setEntreprises((prev) => [...prev, ...tagged]);
+      resolveDirigeants(tagged);
+
+      // verifyCategoriesWithGPT met déjà à jour le state via updateEntreprise en interne ;
+      // la liste retournée sert juste à notre compteur local de résultats filtrés.
+      const updated = await verifyCategoriesWithGPT(tagged);
+      accumule = accumule.map((e) => {
+        const u = updated.find((x) => x.siren === e.siren);
+        return u || e;
+      });
+
+      more = m;
+      const filteredCount = accumule.filter(passesFilters).length;
+      if (filteredCount >= targetFiltered) break;
+      page++;
+    }
+
+    return { accumule, lastPage: page, more };
+  }, [passesFilters, resolveDirigeants, verifyCategoriesWithGPT, withRateLimitRetry]);
+
   const handleSearch = useCallback(async (params) => {
     setError(null);
     setLoading(true);
@@ -89,40 +207,44 @@ export default function App() {
     setHasMore(false);
     setLastSearchParams(params);
 
+    const target = params.per_page || 25;
+
     try {
-      const { entreprises: results, hasMore: more } = await searchEntreprises(params, 1, new Set());
-      setEntreprises(results);
+      const { lastPage, more } = await loadPagesUntilTarget(params, 1, [], target);
+      setCurrentPage(lastPage);
       setHasMore(more);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadPagesUntilTarget]);
 
   const handleLoadMore = useCallback(async () => {
     if (!lastSearchParams || loadingMore || !hasMore) return;
     setLoadingMore(true);
     setError(null);
 
-    const nextPage = currentPage + 1;
-    const existingSirens = new Set(entreprises.map((e) => e.siren));
+    // On vise +N nouveaux résultats filtrés en plus de ce qu'on a déjà
+    const step = lastSearchParams.per_page || 25;
+    const currentFiltered = entreprises.filter(passesFilters).length;
+    const target = currentFiltered + step;
 
     try {
-      const { entreprises: nouvelles, hasMore: more } = await searchEntreprises(
+      const { lastPage, more } = await loadPagesUntilTarget(
         lastSearchParams,
-        nextPage,
-        existingSirens
+        currentPage + 1,
+        entreprises,
+        target
       );
-      setEntreprises((prev) => [...prev, ...nouvelles]);
-      setCurrentPage(nextPage);
-      setHasMore(more && nouvelles.length > 0);
+      setCurrentPage(lastPage);
+      setHasMore(more);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoadingMore(false);
     }
-  }, [lastSearchParams, loadingMore, hasMore, currentPage, entreprises]);
+  }, [lastSearchParams, loadingMore, hasMore, currentPage, entreprises, passesFilters, loadPagesUntilTarget]);
 
   const handleHunterEnrich = useCallback(async () => {
     if (selected.size === 0 || hunterRunning) return;
@@ -176,7 +298,7 @@ export default function App() {
     for (let i = 0; i < toSearch.length; i++) {
       const e = toSearch[i];
       try {
-        const result = await findWebsiteWithClaude({ nom: e.nom_entreprise, ville: e.ville, siren: e.siren });
+        const result = await findWebsiteWithClaude({ nom: e.nom_entreprise, ville: e.ville, code_postal: e.code_postal, siren: e.siren });
         if (result.found) {
           updateEntreprise(e.siren, { site_web: result.site_web });
         }
@@ -242,11 +364,20 @@ export default function App() {
           </div>
         )}
 
+        {pauseInfo && (
+          <div className="bg-amber-50 border border-amber-300 text-amber-800 px-4 py-3 rounded-lg text-sm flex items-center gap-3">
+            <span className="inline-block w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
+            <span>
+              ⏸ Limite API <strong>{pauseInfo.source}</strong> atteinte — reprise dans {pauseInfo.remaining}s…
+            </span>
+          </div>
+        )}
+
         <SearchForm
           onSearch={handleSearch}
           loading={loading}
-          tailleFilter={tailleFilter}
-          onTailleChange={setTailleFilter}
+          categoryFilter={categoryFilter}
+          onCategoryChange={setCategoryFilter}
           exclureGroupes={exclureGroupes}
           onExclureGroupesChange={setExclureGroupes}
           exclureDejaExportes={exclureDejaExportes}
@@ -257,6 +388,8 @@ export default function App() {
             setExportedSirens(new Set());
           }}
         />
+
+        <CsvProcessor withRateLimitRetry={withRateLimitRetry} />
 
         {filteredEntreprises.length > 0 && (
           <>
