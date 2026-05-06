@@ -190,30 +190,24 @@ router.get('/find-website', async (req, res) => {
     const { nom, ville, code_postal } = req.query;
     if (!nom) return res.status(400).json({ error: 'Paramètre nom manquant' });
 
-    // Étape 1 : devinette directe sur nom-entreprise.fr, nomentreprise.fr, .com — validée par le titre HTML
-    const guessed = await guessOfficialDomain(nom);
-    if (guessed) {
-      return res.json({ found: true, site_web: guessed });
-    }
-
-    // Étape 2 : fallback sur Brave Search
+    // On lance en parallèle la devinette de domaine ET la recherche Brave
     const query = [nom, ville, code_postal, 'site officiel'].filter(Boolean).join(' ');
-    const { ok, status, data } = await braveSearch(query, apiKey);
+    const [guessed, braveResult] = await Promise.all([
+      guessOfficialDomain(nom),
+      braveSearch(query, apiKey),
+    ]);
 
+    const { ok, status, data } = braveResult;
     if (!ok) {
       return res.status(status).json({ error: data.message || 'Erreur Brave Search' });
-    }
-
-    const results = data.web?.results || [];
-    if (results.length === 0) {
-      return res.json({ found: false, site_web: null });
     }
 
     const nomNorm = normalize(nom);
     const villeNorm = normalize(ville);
     const tokens = nomTokens(nomNorm);
 
-    const scored = results
+    const results = data.web?.results || [];
+    const scoredBrave = results
       .map((item) => {
         let hostname = '';
         try {
@@ -221,48 +215,67 @@ router.get('/find-website', async (req, res) => {
         } catch {
           return null;
         }
-        // Exclusions annuaires / réseaux sociaux
         if (DIRECTORY_EXCLUSIONS.some((ex) => hostname.includes(ex) || item.url.includes(ex))) {
           return null;
         }
         const titleNorm = normalize(item.title);
         const descNorm = normalize(item.description);
         let score = 0;
-        // Nom dans le hostname (signal le plus fort)
         for (const tok of tokens) {
           if (hostname.includes(tok)) score += 3;
         }
-        // TLD .fr
         if (hostname.endsWith('.fr')) score += 2;
-        // Nom dans le titre
         if (tokens.some((t) => titleNorm.includes(t))) score += 2;
-        // Ville dans titre ou description
         if (villeNorm && (titleNorm.includes(villeNorm) || descNorm.includes(villeNorm))) score += 1;
-        // Code postal dans description (forte discrimination)
         if (code_postal && descNorm.includes(code_postal)) score += 2;
         return { item, hostname, score };
       })
       .filter(Boolean)
       .sort((a, b) => b.score - a.score);
 
-    if (scored.length === 0) {
+    // Liste unifiée de candidats : domaine deviné en tête + top Brave (dédupliqué par hostname)
+    const candidates = [];
+    const seen = new Set();
+    if (guessed) {
+      try {
+        const host = new URL(guessed).hostname.toLowerCase();
+        candidates.push({
+          url: guessed,
+          hostname: host,
+          title: '(domaine deviné depuis le nom de l\'entreprise — page accessible et titre validé)',
+          description: '',
+        });
+        seen.add(host);
+      } catch {}
+    }
+    for (const c of scoredBrave.slice(0, 5)) {
+      if (seen.has(c.hostname)) continue;
+      candidates.push({
+        url: c.item.url,
+        hostname: c.hostname,
+        title: c.item.title || '',
+        description: c.item.description || '',
+      });
+      seen.add(c.hostname);
+    }
+
+    if (candidates.length === 0) {
       return res.json({ found: false, site_web: null });
     }
 
-    // Cas confiant : top score élevé et clairement détaché
-    if (isConfident(scored, 4, 2)) {
-      return res.json({ found: true, site_web: `https://${scored[0].hostname}` });
+    // Un seul candidat = pas besoin de GPT
+    if (candidates.length === 1) {
+      return res.json({ found: true, site_web: candidates[0].url });
     }
 
-    // Cas ambigu : on demande à GPT de trancher parmi le top 5
-    const candidates = scored.slice(0, 5);
-    const lines = candidates
-      .map((c, i) => `${i}) ${c.item.url}\n   Titre: ${c.item.title || ''}\n   Desc: ${c.item.description || ''}`)
-      .join('\n');
+    // GPT tranche systématiquement à partir du nom de l'entreprise
     const lieu = [ville, code_postal].filter(Boolean).join(' ');
+    const lines = candidates
+      .map((c, i) => `${i}) ${c.url}\n   Titre: ${c.title}\n   Desc: ${c.description}`)
+      .join('\n');
     const prompt = `Entreprise : "${nom}"${lieu ? ` (${lieu})` : ''}
 
-Parmi ces résultats de recherche, lequel est le site web officiel de cette entreprise ? Exclus les annuaires, réseaux sociaux et sites d'autres entreprises homonymes. Si aucun ne correspond, réponds null.
+Parmi ces résultats, lequel est le site web officiel de cette entreprise ? Exclus les annuaires, réseaux sociaux et sites d'autres entreprises homonymes. Si aucun ne correspond, réponds null.
 
 ${lines}
 
@@ -270,12 +283,13 @@ Réponds en JSON : {"index": N} où N est le numéro du site officiel, ou {"inde
 
     const gptIdx = await pickWithGPT(candidates, prompt);
     if (gptIdx !== null) {
-      return res.json({ found: true, site_web: `https://${candidates[gptIdx].hostname}` });
+      return res.json({ found: true, site_web: candidates[gptIdx].url });
     }
 
-    // Fallback si GPT n'a pas tranché : on garde le top scoré s'il passe le seuil minimum
-    if (scored[0].score >= 1) {
-      return res.json({ found: true, site_web: `https://${scored[0].hostname}` });
+    // Fallback si GPT abstient : domaine deviné prioritaire, sinon meilleur Brave
+    if (guessed) return res.json({ found: true, site_web: guessed });
+    if (scoredBrave[0]?.score >= 1) {
+      return res.json({ found: true, site_web: `https://${scoredBrave[0].hostname}` });
     }
     return res.json({ found: false, site_web: null });
   } catch (err) {
