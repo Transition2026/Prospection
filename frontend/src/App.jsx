@@ -1,537 +1,569 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import StatusBanner from './components/StatusBanner';
 import SearchForm from './components/SearchForm';
-import ResultsTable from './components/ResultsTable';
-import ExportButton from './components/ExportButton';
 import DetailPanel from './components/DetailPanel';
-import CsvProcessor from './components/CsvProcessor';
-import { checkStatus, searchEntreprises, enrichDropcontact, findWebsiteWithClaude, getDirigeantReel, sleep, getExportedSirens, saveExportedEntreprises, resetExportedSirens, classifyEntreprises, RateLimitError } from './services/api';
+import CompanyCards from './components/CompanyCards';
+import {
+  checkStatus, enrichDropcontact, findRHContact, findWebsiteWithClaude,
+  getDirigeantReel, resolveGooglePlace, searchEntreprises, sleep,
+} from './services/api';
+import {
+  cacheSearchPage, clearCompanyCache, createSearchSignature, exportCompanyCache,
+  getCacheStats, getCachedSearch, hydrateCompanies, importCompanyCache,
+  initializeCompanyCache, updateCachedCompany,
+} from './services/companyCache';
+import { exportInterestedXlsx } from './services/xlsxExport';
 
-const HUNTER_DELAY_MS = 300;
-const DIRIGEANT_DELAY_MS = 300;
-const GPT_CLASSIFY_BATCH = 20;
-const AUTO_LOAD_MAX_PAGES = 10;
-const AUTO_LOAD_MAX_TOTAL = 500;
+const ZERO_EMPLOYEE_CODES = new Set(['NN', '00']);
+const MICRO_CODES = new Set(['01', '02', '03']);
+const PME_CODES = new Set(['11', '12', '21', '22', '31']);
+const DEFAULT_CATEGORY_FILTER = { micro: true, pme: true, grande: false };
+const ENRICHMENT_CONCURRENCY = 4;
+const LEADER_RESOLUTION_CONCURRENCY = 4;
+const LEADER_RESOLVER_VERSION = 2;
+const PLACES_RESOLVER_VERSION = 4;
 
-// Codes INSEE → catégorie (Micro <10, PME 10-249, Grande 250+)
-const TRANCHES_MICRO = ['NN', '00', '01', '02', '03'];
-const TRANCHES_PME = ['11', '12', '21', '22', '31'];
-
-function getCategorieFromTranche(tranche_effectif) {
-  if (!tranche_effectif) return 'micro'; // non renseigné → traité comme Micro par défaut, GPT vérifiera
-  if (TRANCHES_MICRO.includes(tranche_effectif)) return 'micro';
-  if (TRANCHES_PME.includes(tranche_effectif)) return 'pme';
+function categoryFromSize(value) {
+  if (MICRO_CODES.has(value)) return 'micro';
+  if (PME_CODES.has(value)) return 'pme';
   return 'grande';
 }
 
-const DEFAULT_CATEGORY_FILTER = {
-  micro: true,
-  pme: true,
-  grande: false,
-};
+function normalizeCompany(company) {
+  const googleStatus = company.statut_google || company.places_result?.statut || '';
+  return {
+    ...company,
+    statut_google: googleStatus,
+    categorie: company.categorie || categoryFromSize(company.tranche_effectif),
+    prospection_status: company.prospection_status || (googleStatus === 'CLOSED_PERMANENTLY' || googleStatus === 'CLOSED_TEMPORARILY' ? 'not_interested' : 'unspecified'),
+  };
+}
+
+function dedupe(companies) {
+  const seen = new Set();
+  return companies.filter((company) => {
+    if (seen.has(company.siren)) return false;
+    seen.add(company.siren);
+    return true;
+  });
+}
+
+function personFromRh(contact) {
+  const parts = (contact?.nom || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  return {
+    prenom: parts[0],
+    nom: parts.slice(1).join(' '),
+    poste: contact.poste || '',
+    linkedin: contact.url_linkedin || '',
+  };
+}
+
+function normalizedHost(url) {
+  if (!url) return '';
+  try {
+    return new URL(url.startsWith('http') ? url : `https://${url}`).hostname
+      .toLowerCase()
+      .replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function siteComparison(googleSite, braveSite) {
+  const googleHost = normalizedHost(googleSite);
+  const braveHost = normalizedHost(braveSite);
+  if (!googleHost || !braveHost) return { statut: 'source_unique', ajustement: 0, coherent: null };
+  if (googleHost === braveHost || googleHost.endsWith(`.${braveHost}`) || braveHost.endsWith(`.${googleHost}`)) {
+    return { statut: 'concordants', ajustement: 10, coherent: true };
+  }
+  return { statut: 'differents', ajustement: -12, coherent: false };
+}
+
+function placePatchFromResult(places) {
+  return {
+    places_result: places,
+    place_id: places.place_id || '',
+    place_score_initial: places.score ?? places.candidats?.[0]?.score ?? null,
+    place_score: places.score ?? places.candidats?.[0]?.score ?? null,
+    place_fiabilite: places.fiabilite || places.candidat_retenu?.fiabilite || null,
+    place_match_confirme: Boolean(places.match_confirme),
+    place_date_controle: places.date_controle || new Date().toISOString(),
+    nom_google: places.nom_google || '',
+    adresse_google: places.adresse_google || '',
+    telephone_google: places.telephone_public || '',
+    site_web_google: places.site_web || '',
+    statut_google: places.statut || '',
+    latitude_google: places.latitude ?? null,
+    longitude_google: places.longitude ?? null,
+  };
+}
+
+function sitePatchFromSources(company, places, braveSite) {
+  const googleSite = places?.site_web || company.site_web_google || '';
+  const braveSiteFinal = braveSite || company.site_web_brave || '';
+  const comparison = siteComparison(googleSite, braveSiteFinal);
+  const initialScore = places?.score ?? company.place_score_initial ?? company.place_score ?? null;
+  const finalScore = initialScore === null ? null : Math.max(0, Math.min(100, initialScore + comparison.ajustement));
+  const googleReliable = finalScore !== null && finalScore >= 70;
+  const primarySite = googleSite || braveSiteFinal || company.site_web || '';
+  const source = googleSite && braveSiteFinal
+    ? (comparison.coherent ? 'Google Places + Brave cohérents' : 'Google Places + Brave à vérifier')
+    : googleSite ? 'Google Places' : braveSiteFinal ? 'Brave Search' : company.site_source || '';
+
+  return {
+    site_web: primarySite,
+    site_source: source,
+    site_web_google: googleSite,
+    site_web_brave: braveSiteFinal,
+    sites_comparaison: comparison.statut,
+    sites_coherents: comparison.coherent,
+    place_score_initial: initialScore,
+    place_score: finalScore,
+    place_match_confirme: googleReliable,
+    places_result: places ? {
+      ...places,
+      score_initial: initialScore,
+      score_final: finalScore,
+      validation_brave: comparison,
+      match_confirme: googleReliable,
+    } : company.places_result,
+  };
+}
+
+function isTemporarilyClosed(company) {
+  return company.statut_google === 'CLOSED_TEMPORARILY'
+    || company.places_result?.statut === 'CLOSED_TEMPORARILY';
+}
+
+function isInSearchedArea(company, params) {
+  if (!params) return true;
+  const establishmentPostalCode = company.code_postal_etablissement || '';
+  const headquartersPostalCode = company.code_postal_legal || company.code_postal || '';
+  if (params.code_postal) {
+    // Une recherche ville/CP n'accepte que les entreprises dont l'établissement
+    // et le siège légal sont tous les deux situés dans ce code postal.
+    return establishmentPostalCode === params.code_postal && headquartersPostalCode === params.code_postal;
+  }
+  const departements = params.departements || [];
+  if (!departements.length) return true;
+  return departements.includes(establishmentPostalCode.slice(0, 2))
+    && departements.includes(headquartersPostalCode.slice(0, 2));
+}
+
+function needsLeaderResolution(company) {
+  if (company.dirigeant_resolution_at && company.dirigeant_resolver_version === LEADER_RESOLVER_VERSION) return false;
+  // Une personne morale a un nom mais pas de prénom : c'est précisément le
+  // cas qui doit remonter sa chaîne de contrôle dans Data.gouv.
+  return !company.prenom_dirigeant || Boolean(company.siren_dirigeant);
+}
+
+function leaderPatchFromResult(result) {
+  const patch = {
+    dirigeant_resolver_version: LEADER_RESOLVER_VERSION,
+    dirigeant_remontees: result.remontees ?? null,
+    dirigeant_raison: result.raison || '',
+  };
+  if (!['fetch', 'api_error'].includes(result.raison)) patch.dirigeant_resolution_at = new Date().toISOString();
+  if (!result.found) return patch;
+  return {
+    ...patch,
+    prenom_dirigeant: result.prenom || '',
+    nom_dirigeant: result.nom || '',
+    qualite_dirigeant: result.qualite || '',
+    siren_dirigeant: '',
+  };
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+}
 
 export default function App() {
   const [apiStatus, setApiStatus] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [entreprises, setEntreprises] = useState([]);
-  const [selected, setSelected] = useState(new Set());
-  const [hunterProgress, setHunterProgress] = useState(null);
-  const [hunterRunning, setHunterRunning] = useState(false);
-  const [websiteProgress, setWebsiteProgress] = useState(null);
-  const [websiteRunning, setWebsiteRunning] = useState(false);
-  const [error, setError] = useState(null);
+  const [companies, setCompanies] = useState([]);
   const [categoryFilter, setCategoryFilter] = useState(DEFAULT_CATEGORY_FILTER);
-  const [exclureGroupes, setExclureGroupes] = useState(true);
-  const [exportedSirens, setExportedSirens] = useState(new Set());
-  const [exclureDejaExportes, setExclureDejaExportes] = useState(true);
-  const [entrepriseSelectionnee, setEntrepriseSelectionnee] = useState(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [lastSearchParams, setLastSearchParams] = useState(null);
-  const [pauseInfo, setPauseInfo] = useState(null); // { source, remaining } quand en pause rate-limit
+  const [excludeGroups, setExcludeGroups] = useState(true);
+  const [activeSearchParams, setActiveSearchParams] = useState(null);
+  const [view, setView] = useState('discover');
+  const [selected, setSelected] = useState(new Set());
+  const [selectedCompany, setSelectedCompany] = useState(null);
+  const [searching, setSearching] = useState(false);
+  const [searchProgress, setSearchProgress] = useState(null);
+  const [error, setError] = useState(null);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichment, setEnrichment] = useState(null);
+  const [cacheStats, setCacheStats] = useState({ companies: 0, pages: 0 });
+  const cancelSearchRef = useRef(false);
+  const importInputRef = useRef(null);
 
-  const passesFilters = useCallback((e) => {
-    const cat = e.categorie || getCategorieFromTranche(e.tranche_effectif);
-    if (!categoryFilter[cat]) return false;
-    if (exclureGroupes && e.nb_etablissements > 35) return false;
-    if (exclureDejaExportes && exportedSirens.has(e.siren)) return false;
-    return true;
-  }, [categoryFilter, exclureGroupes, exclureDejaExportes, exportedSirens]);
-
-  const filteredEntreprises = entreprises.filter(passesFilters);
-  const masquees = entreprises.length - filteredEntreprises.length;
+  const refreshCacheStats = useCallback(async () => setCacheStats(await getCacheStats()), []);
 
   useEffect(() => {
-    checkStatus()
-      .then(setApiStatus)
-      .catch(() =>
-        setApiStatus({
-          ok: false,
-          message:
-            "Impossible de contacter le serveur backend (http://localhost:3001). Assurez-vous qu'il est démarré.",
-        })
-      );
-    getExportedSirens().then(setExportedSirens).catch(() => {});
-  }, []);
+    initializeCompanyCache().then(refreshCacheStats).catch((err) => setError(`Cache : ${err.message}`));
+    checkStatus().then(setApiStatus).catch(() => setApiStatus({ ok: false, message: 'Backend indisponible sur http://localhost:3001.' }));
+  }, [refreshCacheStats]);
 
-  function updateEntreprise(siren, updates) {
-    setEntreprises((prev) =>
-      prev.map((e) => (e.siren === siren ? { ...e, ...updates } : e))
-    );
-  }
+  const patchCompany = useCallback(async (siren, patch) => {
+    const withDecision = patch.statut_google === 'CLOSED_PERMANENTLY'
+      ? { ...patch, prospection_status: 'not_interested', prospection_reason: 'Google Places : fermé définitivement', prospection_updated_at: new Date().toISOString() }
+      : patch.statut_google === 'CLOSED_TEMPORARILY'
+        ? { ...patch, prospection_status: 'not_interested', prospection_reason: 'Google Places : fermé temporairement', prospection_updated_at: new Date().toISOString() }
+        : patch;
+    setCompanies((previous) => previous.map((company) => company.siren === siren ? { ...company, ...withDecision } : company));
+    setSelectedCompany((previous) => previous?.siren === siren ? { ...previous, ...withDecision } : previous);
+    await updateCachedCompany(siren, withDecision);
+    refreshCacheStats();
+  }, [refreshCacheStats]);
 
-  // Exécute fn ; si rate limit, attend (avec countdown) et retente automatiquement
-  const withRateLimitRetry = useCallback(async (fn, source) => {
-    while (true) {
-      try {
-        return await fn();
-      } catch (err) {
-        if (!err.isRateLimit) throw err;
-        for (let i = err.retryAfter; i > 0; i--) {
-          setPauseInfo({ source, remaining: i });
-          await sleep(1000);
-        }
-        setPauseInfo(null);
-      }
-    }
-  }, []);
+  const passesFilters = useCallback((company, includeStatus = 'unspecified', searchParams = activeSearchParams) => {
+    if (includeStatus && company.prospection_status !== includeStatus) return false;
+    if (isTemporarilyClosed(company)) return false;
+    if (ZERO_EMPLOYEE_CODES.has(company.tranche_effectif)) return false;
+    if (!categoryFilter[company.categorie || categoryFromSize(company.tranche_effectif)]) return false;
+    if (excludeGroups && company.nb_etablissements > 35) return false;
+    if (!isInSearchedArea(company, searchParams)) return false;
+    return true;
+  }, [activeSearchParams, categoryFilter, excludeGroups]);
 
-  // Vérifie avec GPT si des entreprises classées Micro sont en réalité PME/Grande.
-  // Met à jour le state + retourne la liste avec les corrections GPT appliquées.
-  const verifyCategoriesWithGPT = useCallback(async (liste) => {
-    const toCheck = liste.filter((e) => {
-      const cat = e.categorie || getCategorieFromTranche(e.tranche_effectif);
-      return cat === 'micro';
-    });
-    if (toCheck.length === 0) return liste;
+  const visible = companies.filter((company) => passesFilters(company, 'unspecified'));
+  const interested = companies.filter((company) => company.prospection_status === 'interested' && !isTemporarilyClosed(company));
+  const notInterested = companies.filter((company) => company.prospection_status === 'not_interested' && !isTemporarilyClosed(company));
+  const activeCompanies = view === 'discover' ? visible : view === 'interested' ? interested : notInterested;
 
-    const overrides = new Map();
-    for (let i = 0; i < toCheck.length; i += GPT_CLASSIFY_BATCH) {
-      const chunk = toCheck.slice(i, i + GPT_CLASSIFY_BATCH);
-      try {
-        const classifications = await withRateLimitRetry(
-          () => classifyEntreprises(chunk.map((e) => ({ nom: e.nom_entreprise, ville: e.ville }))),
-          'OpenAI'
-        );
-        chunk.forEach((e, idx) => {
-          const cat = classifications[idx];
-          if (cat === 'pme' || cat === 'grande') {
-            overrides.set(e.siren, { categorie: cat, categorie_source: 'gpt' });
-            updateEntreprise(e.siren, { categorie: cat, categorie_source: 'gpt' });
-          }
-        });
-      } catch {
-        // Erreur non-rate-limit : on garde la classification par effectif
-      }
-    }
-    return liste.map((e) => (overrides.has(e.siren) ? { ...e, ...overrides.get(e.siren) } : e));
-  }, [withRateLimitRetry]);
-
-  // Remonte l'arbre pour les entreprises dont le dirigeant affiché est une personne morale
-  const resolveDirigeants = useCallback(async (nouvelles) => {
-    const aRemonter = nouvelles.filter((e) => !e.prenom_dirigeant && e.nom_dirigeant);
-    for (let i = 0; i < aRemonter.length; i++) {
-      const e = aRemonter[i];
-      updateEntreprise(e.siren, { dirigeantResolving: true });
-      try {
-        const result = await getDirigeantReel(e.siren);
-        if (result.found) {
-          updateEntreprise(e.siren, {
-            dirigeantResolving: false,
-            prenom_dirigeant: result.prenom,
-            nom_dirigeant: result.nom,
-            qualite_dirigeant: result.qualite,
-            dirigeant_remontees: result.remontees,
-          });
-        } else {
-          updateEntreprise(e.siren, { dirigeantResolving: false });
-        }
-      } catch {
-        updateEntreprise(e.siren, { dirigeantResolving: false });
-      }
-      if (i < aRemonter.length - 1) await sleep(DIRIGEANT_DELAY_MS);
-    }
-  }, []);
-
-  // Boucle de chargement auto : fetch page par page, attend GPT après chaque, s'arrête
-  // quand on a atteint targetFiltered entreprises passant les filtres OU cap atteint.
-  const loadPagesUntilTarget = useCallback(async (params, startPage, startList, targetFiltered) => {
-    let accumule = [...startList];
-    let page = startPage;
-    let more = true;
-    const MAX_PAGE_FETCH = startPage + AUTO_LOAD_MAX_PAGES - 1;
-
-    while (more && page <= MAX_PAGE_FETCH && accumule.length < AUTO_LOAD_MAX_TOTAL) {
-      const existingSirens = new Set(accumule.map((e) => e.siren));
-      const { entreprises: nouvelles, hasMore: m } = await withRateLimitRetry(
-        () => searchEntreprises(params, page, existingSirens),
-        'data.gouv'
-      );
-
-      if (nouvelles.length === 0) {
-        more = m;
-        break;
-      }
-
-      const tagged = nouvelles.map((e) => ({ ...e, categorie: getCategorieFromTranche(e.tranche_effectif) }));
-      accumule = [...accumule, ...tagged];
-      // Append au lieu d'écraser : préserve les updates asynchrones (dirigeants etc.)
-      setEntreprises((prev) => [...prev, ...tagged]);
-      resolveDirigeants(tagged);
-
-      // verifyCategoriesWithGPT met déjà à jour le state via updateEntreprise en interne ;
-      // la liste retournée sert juste à notre compteur local de résultats filtrés.
-      const updated = await verifyCategoriesWithGPT(tagged);
-      accumule = accumule.map((e) => {
-        const u = updated.find((x) => x.siren === e.siren);
-        return u || e;
-      });
-
-      more = m;
-      const filteredCount = accumule.filter(passesFilters).length;
-      if (filteredCount >= targetFiltered) break;
-      page++;
-    }
-
-    return { accumule, lastPage: page, more };
-  }, [passesFilters, resolveDirigeants, verifyCategoriesWithGPT, withRateLimitRetry]);
-
-  const handleSearch = useCallback(async (params) => {
-    setError(null);
-    setLoading(true);
-    setEntreprises([]);
-    setSelected(new Set());
-    setHunterProgress(null);
-    setCurrentPage(1);
-    setHasMore(false);
-    setLastSearchParams(params);
-
-    const target = params.per_page || 25;
-
-    try {
-      const { lastPage, more } = await loadPagesUntilTarget(params, 1, [], target);
-      setCurrentPage(lastPage);
-      setHasMore(more);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [loadPagesUntilTarget]);
-
-  const handleLoadMore = useCallback(async () => {
-    if (!lastSearchParams || loadingMore || !hasMore) return;
-    setLoadingMore(true);
-    setError(null);
-
-    // On vise +N nouveaux résultats filtrés en plus de ce qu'on a déjà
-    const step = lastSearchParams.per_page || 25;
-    const currentFiltered = entreprises.filter(passesFilters).length;
-    const target = currentFiltered + step;
-
-    try {
-      const { lastPage, more } = await loadPagesUntilTarget(
-        lastSearchParams,
-        currentPage + 1,
-        entreprises,
-        target
-      );
-      setCurrentPage(lastPage);
-      setHasMore(more);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [lastSearchParams, loadingMore, hasMore, currentPage, entreprises, passesFilters, loadPagesUntilTarget]);
-
-  const handleHunterEnrich = useCallback(async () => {
-    if (selected.size === 0 || hunterRunning) return;
-    setHunterRunning(true);
-    setError(null);
-
-    const toEnrich = entreprises.filter((e) => selected.has(e.siren) && !e.email);
-    setHunterProgress({ current: 0, total: toEnrich.length });
-
-    for (let i = 0; i < toEnrich.length; i++) {
-      const e = toEnrich[i];
-      updateEntreprise(e.siren, { emailLoading: true });
-
-      try {
-        const result = await enrichDropcontact({
-          prenom: e.prenom_dirigeant,
-          nom: e.nom_dirigeant,
-          entreprise: e.nom_entreprise,
-          site_web: e.site_web,
-        });
-        if (result.found) {
-          updateEntreprise(e.siren, {
-            emailLoading: false,
-            email: result.email,
-            score: result.score,
-            telephone: result.telephone || null,
-            emailStatus: 'found',
-          });
-        } else {
-          updateEntreprise(e.siren, { emailLoading: false, emailStatus: 'not_found' });
-        }
-      } catch {
-        updateEntreprise(e.siren, { emailLoading: false, emailStatus: 'not_found' });
-      }
-
-      setHunterProgress({ current: i + 1, total: toEnrich.length });
-      if (i < toEnrich.length - 1) await sleep(HUNTER_DELAY_MS);
-    }
-
-    setHunterProgress(null);
-    setHunterRunning(false);
-  }, [selected, entreprises, hunterRunning]);
-
-  const handleFindWebsites = useCallback(async () => {
-    if (selected.size === 0 || websiteRunning) return;
-    setWebsiteRunning(true);
-
-    const toSearch = entreprises.filter((e) => selected.has(e.siren) && !e.site_web);
-    setWebsiteProgress({ current: 0, total: toSearch.length });
-
-    for (let i = 0; i < toSearch.length; i++) {
-      const e = toSearch[i];
-      try {
-        const result = await findWebsiteWithClaude({ nom: e.nom_entreprise, ville: e.ville, code_postal: e.code_postal, siren: e.siren });
-        if (result.found) {
-          updateEntreprise(e.siren, { site_web: result.site_web });
-        }
-      } catch {}
-      setWebsiteProgress({ current: i + 1, total: toSearch.length });
-      if (i < toSearch.length - 1) await sleep(500);
-    }
-
-    setWebsiteProgress(null);
-    setWebsiteRunning(false);
-  }, [selected, entreprises, websiteRunning]);
-
-  function toggleSelect(siren) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(siren)) next.delete(siren);
-      else next.add(siren);
+  const decide = useCallback((siren, status) => {
+    patchCompany(siren, {
+      prospection_status: status,
+      prospection_reason: status === 'unspecified' ? '' : 'Décision manuelle',
+      prospection_updated_at: new Date().toISOString(),
+    }).catch((err) => setError(`Sauvegarde : ${err.message}`));
+    setSelected((previous) => {
+      const next = new Set(previous);
+      if (status !== 'interested') next.delete(siren);
       return next;
     });
-  }
+  }, [patchCompany]);
 
-  function selectAll() {
-    setSelected(new Set(filteredEntreprises.map((e) => e.siren)));
-  }
+  const toggleSelected = useCallback((siren) => {
+    setSelected((previous) => {
+      const next = new Set(previous);
+      if (next.has(siren)) next.delete(siren); else next.add(siren);
+      return next;
+    });
+  }, []);
 
-  function deselectAll() {
+  const resolveDisplayedLeaders = useCallback(async (sourceCompanies) => {
+    const targets = sourceCompanies.filter(needsLeaderResolution);
+    await runWithConcurrency(targets, LEADER_RESOLUTION_CONCURRENCY, async (company) => {
+      try {
+        const result = await getDirigeantReel(company.siren);
+        await patchCompany(company.siren, leaderPatchFromResult(result));
+      } catch {
+        // Une indisponibilité Data.gouv est mémorisée sans bloquer le reste des
+        // cartes ; la prochaine recherche pourra réessayer.
+      }
+    });
+  }, [patchCompany]);
+
+  const handleSearch = useCallback(async (params) => {
+    cancelSearchRef.current = false;
+    setSearching(true);
+    setError(null);
     setSelected(new Set());
-  }
+    setActiveSearchParams(params);
+    const signature = createSearchSignature(params);
+    const requestedLimit = params.limit === 'all' ? Infinity : Number(params.limit || 25);
+    try {
+      const cached = await getCachedSearch(signature);
+      let all = dedupe((await hydrateCompanies(cached.companies)).map(normalizeCompany));
+      setCompanies(all);
+      let page = cached.search.next_page || 1;
+      let hasMore = !cached.search.exhausted;
+      setSearchProgress({ cached: all.length, loaded: all.length, total: cached.search.total_results, page, running: hasMore });
 
-  const emailCount = filteredEntreprises.filter((e) => e.email).length;
+      while (hasMore && !cancelSearchRef.current && all.filter((company) => passesFilters(company, 'unspecified', params)).length < requestedLimit) {
+        await sleep(170); // <= 6 pages/s, sous la limite Data.gouv de 7 req/s.
+        const knownSirens = new Set(all.map((company) => company.siren));
+        const response = await searchEntreprises(params, page, knownSirens);
+        const fetched = response.entreprises.map(normalizeCompany);
+        await cacheSearchPage(signature, page, fetched, { hasMore: response.hasMore, totalPages: response.totalPages, totalResults: response.totalResults });
+        const hydrated = await hydrateCompanies(fetched);
+        all = dedupe([...all, ...hydrated.map(normalizeCompany)]);
+        setCompanies(all);
+        hasMore = response.hasMore;
+        setSearchProgress({ cached: cached.companies.length, loaded: all.length, total: response.totalResults || null, page, running: hasMore });
+        page += 1;
+      }
+      await refreshCacheStats();
+      void resolveDisplayedLeaders(all.filter((company) => passesFilters(company, 'unspecified', params)));
+    } catch (err) {
+      setError(err.message || 'Recherche impossible.');
+    } finally {
+      setSearching(false);
+      setSearchProgress((previous) => previous ? { ...previous, running: false } : null);
+    }
+  }, [passesFilters, refreshCacheStats, resolveDisplayedLeaders]);
 
+  const enrichOne = useCallback(async (initial, stats) => {
+    let company = initial;
+    let places;
+    // Une indisponibilité réseau n'est pas une réponse Places : on la garde
+    // comme trace, mais une nouvelle sélection doit pouvoir réessayer.
+    if (company.places_result && company.places_result.raison !== 'erreur_places' && company.places_result.resolver_version === PLACES_RESOLVER_VERSION) {
+      places = company.places_result;
+      stats.google_tentes += 1;
+      if (places.found || places.candidats?.length) stats.google_trouves += 1;
+    } else try {
+      places = await resolveGooglePlace({
+        nom: company.nom_entreprise,
+        enseigne: company.enseigne_etablissement,
+        adresse: company.adresse_etablissement || company.adresse_legale || company.adresse,
+        code_postal: company.code_postal_etablissement || company.code_postal_legal || company.code_postal,
+        ville: company.ville_etablissement || company.ville_legale || company.ville,
+        latitude: company.latitude_etablissement,
+        longitude: company.longitude_etablissement,
+      });
+      stats.google_tentes += 1;
+      if (places.found || places.candidats?.length) stats.google_trouves += 1;
+    } catch (err) {
+      stats.echecs += 1;
+      places = { found: false, raison: err.message || 'erreur_places', candidats: [] };
+      await patchCompany(company.siren, { places_result: places, place_date_controle: new Date().toISOString() });
+    }
+
+    if (places?.site_web) stats.sites_google += 1;
+    if (places?.statut === 'CLOSED_PERMANENTLY') stats.google_fermes += 1;
+    if (places?.statut === 'CLOSED_TEMPORARILY') stats.google_temporairement_fermes += 1;
+    if (places) {
+      const placePatch = placePatchFromResult(places);
+      company = { ...company, ...placePatch };
+      await patchCompany(company.siren, placePatch);
+    }
+
+    // Brave et la recherche RH sont intentionnellement systématiques et
+    // parallèles : Brave sert aussi de second avis sur le site retourné par
+    // Google, même lorsqu'un site Google existe déjà.
+    const [braveResult, rhPatch, leaderPatch] = await Promise.all([
+      (async () => {
+        try {
+          const website = await findWebsiteWithClaude({
+            nom: company.nom_entreprise,
+            ville: company.ville_etablissement || company.ville,
+            code_postal: company.code_postal_etablissement || company.code_postal,
+            siren: company.siren,
+          });
+          if (!website.found || !website.site_web) return null;
+          stats.sites_brave += 1;
+          return website.site_web;
+        } catch {
+          stats.echecs += 1;
+          return null;
+        }
+      })(),
+      (async () => {
+        try {
+          const result = await findRHContact({
+            nom: company.nom_entreprise,
+            enseigne: company.enseigne_etablissement,
+            ville: company.ville_etablissement || company.ville,
+            code_postal: company.code_postal_etablissement || company.code_postal,
+            site_web: company.site_web_google || company.site_web,
+          });
+          if (!result.found || !result.contact_rh) return null;
+          stats.rh_trouves += 1;
+          return { contact_rh: result.contact_rh };
+        } catch {
+          stats.echecs += 1;
+          return null;
+        }
+      })(),
+      needsLeaderResolution(company) ? (async () => {
+        try {
+          const leader = await getDirigeantReel(company.siren);
+          return leaderPatchFromResult(leader);
+        } catch {
+          stats.echecs += 1;
+          return null;
+        }
+      })() : Promise.resolve(null),
+    ]);
+
+    const supplementalPatches = [rhPatch, leaderPatch].filter(Boolean);
+    if (supplementalPatches.length) {
+      company = Object.assign({}, company, ...supplementalPatches);
+      await Promise.all(supplementalPatches.map((patch) => patchCompany(company.siren, patch)));
+    }
+
+    const sitesPatch = sitePatchFromSources(company, places, braveResult);
+    company = { ...company, ...sitesPatch };
+    await patchCompany(company.siren, sitesPatch);
+
+    // Une entreprise fermée conserve tous ses retours Google/Brave/RH, mais
+    // n'entame pas de crédit Dropcontact pour un contact à exclure.
+    if (company.statut_google === 'CLOSED_PERMANENTLY' || company.statut_google === 'CLOSED_TEMPORARILY') return;
+
+    const target = personFromRh(company.contact_rh) || (company.nom_dirigeant ? { prenom: company.prenom_dirigeant, nom: company.nom_dirigeant } : null);
+    if (company.email) return;
+    try {
+      const result = await enrichDropcontact({
+        prenom: target?.prenom || '',
+        nom: target?.nom || '',
+        entreprise: company.nom_entreprise,
+        site_web: company.site_web,
+        siren: company.siren,
+        siret: company.siret_etablissement || company.siret_siege || '',
+        pays: 'FR',
+        poste: target?.poste || company.qualite_dirigeant || '',
+        linkedin: target?.linkedin || '',
+        telephone: company.telephone_google || '',
+      });
+      const dropcontactPatch = {
+        site_web_dropcontact: result.website || result.enrichment?.website || '',
+        linkedin_contact: result.linkedin || result.enrichment?.linkedin || '',
+        company_dropcontact: result.company || result.enrichment?.company || '',
+        dropcontact_result: result.enrichment || null,
+      };
+      if (result.found) {
+        stats.emails_trouves += 1;
+        await patchCompany(company.siren, {
+          ...dropcontactPatch,
+          email: result.email,
+          score: result.score,
+          email_qualification: result.qualification || '',
+          telephone: result.telephone || '',
+          telephone_mobile: result.telephone_mobile || '',
+          emailStatus: 'found',
+          contact_email_source: company.contact_rh ? 'RH Brave Search + Dropcontact' : target ? 'Dirigeant + Dropcontact' : 'Organisation + Dropcontact',
+        });
+      } else {
+        await patchCompany(company.siren, { ...dropcontactPatch, emailStatus: 'not_found' });
+      }
+    } catch { stats.echecs += 1; }
+  }, [patchCompany]);
+
+  const handleEnrich = useCallback(async () => {
+    const targets = interested.filter((company) => selected.has(company.siren));
+    if (!targets.length) return;
+    setEnriching(true);
+    const stats = { total: targets.length, terminees: 0, google_tentes: 0, google_trouves: 0, google_fermes: 0, google_temporairement_fermes: 0, sites_google: 0, sites_brave: 0, rh_trouves: 0, emails_trouves: 0, echecs: 0 };
+    setEnrichment({ ...stats });
+    try {
+      await runWithConcurrency(targets, ENRICHMENT_CONCURRENCY, async (company) => {
+        try {
+          await enrichOne(company, stats);
+        } catch {
+          stats.echecs += 1;
+        } finally {
+          stats.terminees += 1;
+          setEnrichment({ ...stats });
+        }
+      });
+    } finally {
+      setEnriching(false);
+      setSelected(new Set());
+    }
+  }, [enrichOne, interested, selected]);
+
+  const handleClearCache = useCallback(async () => {
+    if (!window.confirm('Supprimer le cache local, les pages mémorisées et les décisions de prospection ?')) return;
+    await clearCompanyCache();
+    setCompanies([]);
+    setSelected(new Set());
+    await refreshCacheStats();
+  }, [refreshCacheStats]);
+
+  const handleCacheExport = useCallback(async () => {
+    const payload = await exportCompanyCache();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cache_prospection_${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const handleCacheImport = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const merged = await importCompanyCache(JSON.parse(await file.text()));
+      await refreshCacheStats();
+      setError(null);
+      window.alert(`${merged} élément(s) de cache fusionné(s).`);
+    } catch (err) {
+      setError(`Import du cache : ${err.message}`);
+    } finally {
+      event.target.value = '';
+    }
+  }, [refreshCacheStats]);
+
+  const selectedInterested = interested.filter((company) => selected.has(company.siren));
   return (
     <div className="min-h-screen bg-gray-50">
-      <DetailPanel
-        entreprise={entrepriseSelectionnee}
-        onClose={() => setEntrepriseSelectionnee(null)}
-        onUpdateEntreprise={(siren, updates) => {
-          updateEntreprise(siren, updates);
-          setEntrepriseSelectionnee((prev) => prev ? { ...prev, ...updates } : prev);
-        }}
-      />
-      {/* Header */}
+      <DetailPanel entreprise={selectedCompany} onClose={() => setSelectedCompany(null)} onUpdateEntreprise={patchCompany} />
       <header className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </div>
+        <div className="max-w-7xl mx-auto px-6 py-4 flex flex-wrap items-center gap-4">
+          <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">P</div>
           <div>
             <h1 className="text-lg font-bold text-gray-900">Prospection B2B</h1>
-            <p className="text-xs text-gray-500">Nord de la France — data.gouv.fr + Dropcontact</p>
+            <p className="text-xs text-gray-500">Data.gouv · Google Places · Brave Search · Dropcontact</p>
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-3 text-xs">
+            <span className="text-gray-400">Cache : {cacheStats.companies} fiches · {cacheStats.pages} pages</span>
+            <button type="button" onClick={handleCacheExport} className="text-blue-600 hover:underline">Exporter le cache</button>
+            <button type="button" onClick={() => importInputRef.current?.click()} className="text-blue-600 hover:underline">Importer le cache</button>
+            <input ref={importInputRef} type="file" accept="application/json" className="hidden" onChange={handleCacheImport} />
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
         <StatusBanner status={apiStatus} />
+        {error && <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+        <SearchForm onSearch={handleSearch} loading={searching} categoryFilter={categoryFilter} onCategoryChange={setCategoryFilter} exclureGroupes={excludeGroups} onExclureGroupesChange={setExcludeGroups} cacheOnly={false} />
 
-        {error && (
-          <div className="bg-red-50 border border-red-300 text-red-700 px-4 py-3 rounded-lg text-sm">
-            <strong>Erreur :</strong> {error}
+        {searchProgress && (
+          <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex flex-wrap items-center gap-3">
+            <span>{searchProgress.loaded} entreprises mémorisées{searchProgress.total ? ` sur ${searchProgress.total}` : ''} · page {searchProgress.page}</span>
+            {searching && <button type="button" onClick={() => { cancelSearchRef.current = true; }} className="ml-auto text-red-600 underline">Arrêter la recherche</button>}
           </div>
         )}
 
-        {pauseInfo && (
-          <div className="bg-amber-50 border border-amber-300 text-amber-800 px-4 py-3 rounded-lg text-sm flex items-center gap-3">
-            <span className="inline-block w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
-            <span>
-              ⏸ Limite API <strong>{pauseInfo.source}</strong> atteinte — reprise dans {pauseInfo.remaining}s…
-            </span>
-          </div>
+        <nav className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
+          {[['discover', `À traiter (${visible.length})`], ['interested', `Intéressées (${interested.length})`], ['not_interested', `Pas intéressées (${notInterested.length})`]].map(([key, label]) => (
+            <button key={key} type="button" onClick={() => { setView(key); if (key !== 'interested') setSelected(new Set()); }} className={`px-4 py-2 rounded-full text-sm font-medium ${view === key ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600'}`}>{label}</button>
+          ))}
+        </nav>
+
+        {view === 'interested' && (
+          <section className="rounded-2xl bg-white border border-gray-200 p-4 flex flex-wrap items-center gap-3">
+            <button type="button" onClick={() => setSelected(new Set(interested.map((company) => company.siren)))} className="text-sm text-blue-600 hover:underline">Tout sélectionner</button>
+            <button type="button" onClick={() => setSelected(new Set())} className="text-sm text-gray-500 hover:underline">Tout désélectionner</button>
+            <span className="text-sm text-gray-500">{selectedInterested.length} sélectionnée{selectedInterested.length > 1 ? 's' : ''}</span>
+            <button type="button" disabled={!selectedInterested.length || enriching} onClick={handleEnrich} className="ml-auto px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-200 text-white font-semibold text-sm">{enriching ? 'Enrichissement en cours…' : 'Enrichir la sélection'}</button>
+            <button type="button" disabled={!selectedInterested.length} onClick={() => exportInterestedXlsx(selectedInterested)} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">Exporter XLSX</button>
+          </section>
         )}
 
-        <SearchForm
-          onSearch={handleSearch}
-          loading={loading}
-          categoryFilter={categoryFilter}
-          onCategoryChange={setCategoryFilter}
-          exclureGroupes={exclureGroupes}
-          onExclureGroupesChange={setExclureGroupes}
-          exclureDejaExportes={exclureDejaExportes}
-          onExclureDejaExportesChange={setExclureDejaExportes}
-          exportedCount={exportedSirens.size}
-          onResetExports={() => {
-            resetExportedSirens().catch(() => {});
-            setExportedSirens(new Set());
-          }}
-        />
-
-        <CsvProcessor withRateLimitRetry={withRateLimitRetry} />
-
-        {filteredEntreprises.length > 0 && (
-          <>
-            <ResultsTable
-              entreprises={filteredEntreprises}
-              selected={selected}
-              onToggleSelect={toggleSelect}
-              onSelectAll={selectAll}
-              onDeselectAll={deselectAll}
-              hunterProgress={hunterProgress}
-              onSelectEntreprise={setEntrepriseSelectionnee}
-              exportedSirens={exportedSirens}
-            />
-
-            {/* Bouton Charger plus */}
-            {lastSearchParams && (
-              <div className="flex justify-center">
-                <button
-                  onClick={handleLoadMore}
-                  disabled={loadingMore}
-                  className="px-6 py-2.5 bg-white border border-gray-300 hover:border-blue-400 hover:text-blue-600 disabled:opacity-50 text-gray-600 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 shadow-sm"
-                >
-                  {loadingMore ? (
-                    <>
-                      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                      </svg>
-                      Chargement...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                      Charger plus d'entreprises
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-
-            {/* Barre d'actions */}
-            <div className="flex items-center justify-between bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-4">
-              <p className="text-sm text-gray-500">
-                <span className="font-semibold text-gray-700">{filteredEntreprises.length}</span>{' '}
-                entreprise{filteredEntreprises.length > 1 ? 's' : ''} affichée{filteredEntreprises.length > 1 ? 's' : ''}
-                {masquees > 0 && (
-                  <span className="text-gray-400">
-                    {' '}({masquees} masquée{masquees > 1 ? 's' : ''} par le filtre taille)
-                  </span>
-                )}
-                {emailCount > 0 && (
-                  <>
-                    {' '}—{' '}
-                    <span className="font-semibold text-green-600">{emailCount}</span> email
-                    {emailCount > 1 ? 's' : ''} récupéré{emailCount > 1 ? 's' : ''}
-                  </>
-                )}
-              </p>
-
-              <div className="flex items-center gap-3">
-                <ExportButton
-                  data={filteredEntreprises}
-                  selected={selected}
-                  onExported={(exported) => {
-                    saveExportedEntreprises(exported).catch(() => {});
-                    setExportedSirens((prev) => new Set([...prev, ...exported.map((e) => e.siren)]));
-                    setSelected(new Set());
-                  }}
-                />
-
-                {selected.size > 0 && (
-                  <button
-                    onClick={handleFindWebsites}
-                    disabled={websiteRunning}
-                    className="px-5 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
-                  >
-                    {websiteRunning ? (
-                      <>
-                        <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                        </svg>
-                        Sites web... ({websiteProgress?.current}/{websiteProgress?.total})
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
-                        </svg>
-                        Trouver les sites ({selected.size})
-                      </>
-                    )}
-                  </button>
-                )}
-
-                {selected.size > 0 && (
-                  <button
-                    onClick={handleHunterEnrich}
-                    disabled={hunterRunning}
-                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2"
-                  >
-                    {hunterRunning ? (
-                      <>
-                        <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                        </svg>
-                        Recherche Dropcontact en cours...
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                        </svg>
-                        Trouver les emails ({selected.size} sélectionné{selected.size > 1 ? 's' : ''})
-                      </>
-                    )}
-                  </button>
-                )}
-              </div>
+        {enrichment && (
+          <section className="rounded-2xl border border-indigo-100 bg-indigo-50 p-5">
+            <h2 className="font-semibold text-indigo-950">Résumé d’enrichissement {enriching ? `· ${enrichment.terminees}/${enrichment.total}` : 'terminé'}</h2>
+            <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm text-indigo-900">
+              <span>Places : {enrichment.google_trouves}/{enrichment.google_tentes}</span><span>Fermées : {enrichment.google_fermes}</span><span>Fermées temporairement : {enrichment.google_temporairement_fermes}</span><span>Sites Google : {enrichment.sites_google}</span><span>Sites Brave : {enrichment.sites_brave}</span><span>Contacts RH : {enrichment.rh_trouves}</span><span>Emails : {enrichment.emails_trouves}</span><span>Échecs : {enrichment.echecs}</span>
             </div>
-          </>
+          </section>
         )}
 
-        {/* Cas : des résultats existent mais tous masqués par le filtre */}
-        {!loading && entreprises.length > 0 && filteredEntreprises.length === 0 && (
-          <div className="text-center py-12 text-gray-400">
-            <p className="font-medium">Tous les résultats sont masqués par le filtre taille.</p>
-            <p className="text-sm mt-1">Ajustez les cases à cocher dans le formulaire.</p>
-          </div>
-        )}
-
-        {!loading && entreprises.length === 0 && !error && (
-          <div className="text-center py-16 text-gray-400">
-            <svg className="w-12 h-12 mx-auto mb-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-4.35-4.35M16.65 16.65A7.5 7.5 0 1116.65 2a7.5 7.5 0 010 14.65z" />
-            </svg>
-            <p>Lancez une recherche pour afficher les résultats</p>
-          </div>
-        )}
+        <CompanyCards companies={activeCompanies} onDecision={decide} onOpen={setSelectedCompany} selectable={view === 'interested'} selected={selected} onToggleSelect={toggleSelected} />
       </main>
     </div>
   );

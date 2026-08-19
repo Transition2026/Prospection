@@ -109,8 +109,8 @@ export default function ResultsTable({
               <th className="px-4 py-3 text-left font-medium text-gray-600">Qualité</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Taille</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Secteur</th>
-              <th className="px-4 py-3 text-left font-medium text-gray-600">CP</th>
-              <th className="px-4 py-3 text-left font-medium text-gray-600">Ville</th>
+              <th className="px-4 py-3 text-left font-medium text-gray-600">CP établissement</th>
+              <th className="px-4 py-3 text-left font-medium text-gray-600">Ville établissement</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Site web</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Email</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">Actions</th>
@@ -186,8 +186,8 @@ export default function ResultsTable({
                 <td className="px-4 py-3 text-gray-500 text-xs max-w-[120px] truncate">
                   {e.libelle_code_naf || <span className="text-gray-300">—</span>}
                 </td>
-                <td className="px-4 py-3 text-gray-500 text-xs">{e.code_postal || '—'}</td>
-                <td className="px-4 py-3 text-gray-500 text-xs">{e.ville || '—'}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs">{e.code_postal_etablissement || e.code_postal || '—'}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs">{e.ville_etablissement || e.ville || '—'}</td>
                 <td className="px-4 py-3 text-xs max-w-[140px]" onClick={(ev) => ev.stopPropagation()}>
                   {e.site_web ? (
                     <a

@@ -58,6 +58,7 @@ Assure toi d'avoir Visual Studio Code d'installé
 ```
 DROPCONTACT_API_KEY=ta_cle_dropcontact
 BRAVE_API_KEY=ta_cle_brave
+GOOGLE_PLACES_API_KEY=ta_cle_google_places
 PORT=3001
 DATABASE_URL="postgresql://..."
 ```
@@ -70,6 +71,7 @@ DATABASE_URL="postgresql://..."
 |-----|---------|---------|
 | `DROPCONTACT_API_KEY` | Dropcontact | Recherche d'emails professionnels |
 | `BRAVE_API_KEY` | Brave Search | Recherche de sites web et contacts RH |
+| `GOOGLE_PLACES_API_KEY` | Google Places API (New) | Validation de l'établissement, adresse, téléphone et site public |
 | `PORT` | — | Port du serveur (ne pas modifier, laisser 3001) |
 | `DATABASE_URL` | Supabase (PostgreSQL) | Base de données pour l'historique des exports |
 
@@ -112,7 +114,8 @@ Vérifie la valeur de `DATABASE_URL` dans le `.env` — elle doit être identiqu
 L'application est un outil de prospection B2B qui permet de :
 
 - **Rechercher des entreprises** par secteur d'activité, département, taille
-- **Trouver le site web** d'une entreprise via Brave Search
+- **Confirmer l'établissement, le téléphone et le site public** via Google Places
+- **Trouver le site web** d'une entreprise via Brave Search (secours et recherche RH)
 - **Chercher un contact RH** via Brave Search (LinkedIn)
 - **Récupérer l'email et le téléphone** du dirigeant via Dropcontact
 - **Exclure les entreprises déjà contactées** grâce à l'historique en base de données

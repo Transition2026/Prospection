@@ -9,6 +9,7 @@ const statusRoutes = require('./routes/status');
 const claudeRoutes = require('./routes/claude');
 const exportsRoutes = require('./routes/exports');
 const dropcontactRoutes = require('./routes/dropcontact');
+const placesRoutes = require('./routes/places');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,6 +27,7 @@ app.use('/api/hunter', hunterRoutes);
 app.use('/api/claude', claudeRoutes);
 app.use('/api/exports', exportsRoutes);
 app.use('/api/dropcontact', dropcontactRoutes);
+app.use('/api/places', placesRoutes);
 
 // Servir le frontend buildé en production
 if (isProd) {
