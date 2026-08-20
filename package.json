@@ -34,6 +34,15 @@
           "!node_modules/.cache/**",
           "!*.log"
         ]
+      },
+      {
+        "from": "backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*",
+          "!.cache/**",
+          "!**/*.log"
+        ]
       }
     ],
     "win": {
