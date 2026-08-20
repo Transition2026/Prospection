@@ -1,5 +1,5 @@
 const DB_NAME = 'prospection-b2b-cache';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const LEGACY_CACHE_KEY = 'prospection-b2b.company-cache.v1';
 const STORES = { companies: 'companies', searches: 'searches', pages: 'pages', meta: 'meta' };
 
@@ -36,9 +36,59 @@ function openDatabase() {
   });
 }
 
-function persistentCompany(company) {
-  const { emailLoading, dirigeantResolving, enriching, ...data } = company;
+function persistentCompany(company = {}) {
+  const {
+    emailLoading,
+    dirigeantResolving,
+    enriching,
+    data_gouv_brut,
+    adresse_components,
+    ...data
+  } = company;
+  if (Array.isArray(data.dirigeants)) {
+    data.dirigeants = data.dirigeants.map((dirigeant) => ({
+      prenoms: dirigeant.prenoms || '',
+      nom: dirigeant.nom || '',
+      qualite: dirigeant.qualite || '',
+      siren: dirigeant.siren || '',
+    }));
+  }
   return data;
+}
+
+function hydratedRecord(record) {
+  return {
+    ...persistentCompany(record?.base),
+    ...persistentCompany(record?.data),
+  };
+}
+
+function compactBase(company = {}) {
+  const source = persistentCompany(company);
+  const fields = [
+    'siren', 'nom_entreprise', 'prenom_dirigeant', 'nom_dirigeant',
+    'qualite_dirigeant', 'siren_dirigeant', 'dirigeants',
+    'adresse_legale', 'code_postal_legal', 'ville_legale', 'siret_siege',
+    'adresse_etablissement', 'code_postal_etablissement', 'ville_etablissement',
+    'siret_etablissement', 'enseigne_etablissement', 'latitude_etablissement',
+    'longitude_etablissement', 'code_postal', 'ville', 'adresse', 'code_naf',
+    'tranche_effectif', 'nb_etablissements', 'site_web',
+  ];
+  return Object.fromEntries(fields
+    .filter((field) => source[field] !== undefined)
+    .map((field) => [field, source[field]]));
+}
+
+function cacheRecord(siren, base, previous, updatedAt = isoNow()) {
+  return {
+    siren,
+    // La source Data.gouv est remplacée à chaque nouvelle recherche. Les
+    // décisions et enrichissements restent dans `data` et ne sont jamais
+    // écrasés par une réponse fraîche de l'API.
+    base: compactBase(base),
+    data: persistentCompany(previous?.data),
+    updated_at: previous?.updated_at || updatedAt,
+  };
 }
 
 function isoNow() {
@@ -70,7 +120,46 @@ async function migrateLegacyCache(db) {
 export async function initializeCompanyCache() {
   const db = await openDatabase();
   await migrateLegacyCache(db);
+  await compactSearchPages(db);
   return db;
+}
+
+// Les anciennes versions répétaient une fiche complète dans chaque page de
+// recherche. On migre vers une fiche canonique par SIREN et des pages qui ne
+// contiennent plus que les SIREN, sans perdre les décisions/enrichissements.
+async function compactSearchPages(db) {
+  const transaction = db.transaction([STORES.companies, STORES.pages, STORES.meta], 'readwrite');
+  const completed = transactionResult(transaction);
+  const meta = transaction.objectStore(STORES.meta);
+  const layout = await requestResult(meta.get('cache-layout-version'));
+  if (layout?.value === 2) {
+    await completed;
+    return;
+  }
+
+  const pagesStore = transaction.objectStore(STORES.pages);
+  const companiesStore = transaction.objectStore(STORES.companies);
+  const pages = await requestResult(pagesStore.getAll());
+  for (const page of pages) {
+    const legacyCompanies = page.companies || [];
+    if (legacyCompanies.length === 0) continue;
+    const sirens = [];
+    for (const company of legacyCompanies) {
+      if (!company?.siren) continue;
+      const previous = await requestResult(companiesStore.get(company.siren));
+      companiesStore.put(cacheRecord(company.siren, company, previous, page.updated_at || isoNow()));
+      sirens.push(company.siren);
+    }
+    pagesStore.put({
+      key: page.key,
+      signature: page.signature,
+      page: page.page,
+      sirens: [...new Set(sirens)],
+      updated_at: page.updated_at || isoNow(),
+    });
+  }
+  meta.put({ key: 'cache-layout-version', value: 2, updated_at: isoNow() });
+  await completed;
 }
 
 export function createSearchSignature(params) {
@@ -85,24 +174,37 @@ export function createSearchSignature(params) {
 
 export async function getCachedSearch(signature) {
   const db = await initializeCompanyCache();
-  const transaction = db.transaction([STORES.searches, STORES.pages], 'readonly');
+  const transaction = db.transaction([STORES.companies, STORES.searches, STORES.pages], 'readonly');
   const completed = transactionResult(transaction);
   const search = await requestResult(transaction.objectStore(STORES.searches).get(signature));
   const pages = await requestResult(transaction.objectStore(STORES.pages).index('signature').getAll(signature));
+  const records = await requestResult(transaction.objectStore(STORES.companies).getAll());
   await completed;
   const ordered = pages.sort((a, b) => a.page - b.page);
+  const companiesBySiren = new Map(records.map((record) => [record.siren, hydratedRecord(record)]));
   return {
     search: search || { signature, next_page: 1, exhausted: false, total_pages: null },
-    companies: ordered.flatMap((page) => page.companies || []),
+    companies: ordered.flatMap((page) => {
+      if (Array.isArray(page.sirens)) return page.sirens.map((siren) => companiesBySiren.get(siren)).filter(Boolean);
+      return page.companies || [];
+    }),
   };
 }
 
 export async function cacheSearchPage(signature, page, companies, metadata = {}) {
   const db = await initializeCompanyCache();
   const now = isoNow();
-  const transaction = db.transaction([STORES.searches, STORES.pages], 'readwrite');
+  const transaction = db.transaction([STORES.companies, STORES.searches, STORES.pages], 'readwrite');
   const completed = transactionResult(transaction);
-  transaction.objectStore(STORES.pages).put({ key: `${signature}:${page}`, signature, page, companies: companies.map(persistentCompany), updated_at: now });
+  const companyStore = transaction.objectStore(STORES.companies);
+  const sirens = [];
+  for (const company of companies) {
+    if (!company?.siren) continue;
+    const previous = await requestResult(companyStore.get(company.siren));
+    companyStore.put(cacheRecord(company.siren, company, previous, now));
+    sirens.push(company.siren);
+  }
+  transaction.objectStore(STORES.pages).put({ key: `${signature}:${page}`, signature, page, sirens: [...new Set(sirens)], updated_at: now });
   transaction.objectStore(STORES.searches).put({
     signature,
     next_page: metadata.hasMore ? page + 1 : page,
@@ -120,12 +222,12 @@ export async function getCompanyOverrides() {
   const completed = transactionResult(transaction);
   const records = await requestResult(transaction.objectStore(STORES.companies).getAll());
   await completed;
-  return new Map(records.map((record) => [record.siren, record]));
+  return new Map(records.map((record) => [record.siren, hydratedRecord(record)]));
 }
 
 export async function hydrateCompanies(companies) {
   const overrides = await getCompanyOverrides();
-  return companies.map((company) => ({ ...company, ...(overrides.get(company.siren)?.data || {}) }));
+  return companies.map((company) => ({ ...company, ...(overrides.get(company.siren) || {}) }));
 }
 
 export async function updateCachedCompany(siren, patch) {
@@ -135,7 +237,12 @@ export async function updateCachedCompany(siren, patch) {
   const completed = transactionResult(transaction);
   const store = transaction.objectStore(STORES.companies);
   const previous = await requestResult(store.get(siren));
-  const record = { siren, data: { ...(previous?.data || {}), ...persistentCompany(patch) }, updated_at: isoNow() };
+  const record = {
+    siren,
+    base: persistentCompany(previous?.base),
+    data: { ...persistentCompany(previous?.data), ...persistentCompany(patch) },
+    updated_at: isoNow(),
+  };
   store.put(record);
   await completed;
   return record;
@@ -175,15 +282,15 @@ export async function exportCompanyCache() {
   const searches = await requestResult(transaction.objectStore(STORES.searches).getAll());
   const pages = await requestResult(transaction.objectStore(STORES.pages).getAll());
   await completed;
-  return { version: 2, exported_at: isoNow(), companies, searches, pages };
+  return { version: 3, exported_at: isoNow(), companies, searches, pages };
 }
 
 export async function importCompanyCache(payload) {
-  if (!payload || payload.version !== 2 || !Array.isArray(payload.companies)) throw new Error('Fichier de cache incompatible.');
+  if (!payload || ![2, 3].includes(payload.version) || !Array.isArray(payload.companies)) throw new Error('Fichier de cache incompatible.');
   const db = await initializeCompanyCache();
-  const transaction = db.transaction([STORES.companies, STORES.searches, STORES.pages], 'readwrite');
+  const transaction = db.transaction([STORES.companies, STORES.searches, STORES.pages, STORES.meta], 'readwrite');
   const completed = transactionResult(transaction);
-  const stores = { companies: transaction.objectStore(STORES.companies), searches: transaction.objectStore(STORES.searches), pages: transaction.objectStore(STORES.pages) };
+  const stores = { companies: transaction.objectStore(STORES.companies), searches: transaction.objectStore(STORES.searches), pages: transaction.objectStore(STORES.pages), meta: transaction.objectStore(STORES.meta) };
   const datasets = [['companies', payload.companies || [], 'siren'], ['searches', payload.searches || [], 'signature'], ['pages', payload.pages || [], 'key']];
   let merged = 0;
   for (const [storeName, records, key] of datasets) {
@@ -193,11 +300,13 @@ export async function importCompanyCache(payload) {
       if (storeName === 'companies' && previous) {
         const importedIsNewer = (record.updated_at || '') > (previous.updated_at || '');
         stores[storeName].put({
-          ...(importedIsNewer ? previous : record),
-          ...(importedIsNewer ? record : previous),
+          siren: record.siren,
+          base: importedIsNewer
+            ? { ...persistentCompany(previous.base), ...persistentCompany(record.base) }
+            : { ...persistentCompany(record.base), ...persistentCompany(previous.base) },
           data: importedIsNewer
-            ? { ...(previous.data || {}), ...(record.data || {}) }
-            : { ...(record.data || {}), ...(previous.data || {}) },
+            ? { ...persistentCompany(previous.data), ...persistentCompany(record.data) }
+            : { ...persistentCompany(record.data), ...persistentCompany(previous.data) },
           updated_at: importedIsNewer ? record.updated_at : previous.updated_at,
         });
         merged += 1;
@@ -219,6 +328,9 @@ export async function importCompanyCache(payload) {
         merged += 1;
       }
     }
+  }
+  if ((payload.pages || []).some((page) => Array.isArray(page.companies))) {
+    stores.meta.put({ key: 'cache-layout-version', value: 1, updated_at: isoNow() });
   }
   await completed;
   return merged;

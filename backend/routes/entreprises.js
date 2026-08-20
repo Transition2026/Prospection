@@ -98,11 +98,14 @@ async function remonterDirigeant(siren, visited = new Set(), depth = 0) {
 // GET /api/entreprises/search
 router.get('/search', async (req, res) => {
   try {
-    const { departement, code_postal, section, q, per_page = 25, page = 1 } = req.query;
+    const { departement, code_postal, section, q, nom_contient, per_page = 25, page = 1 } = req.query;
 
     const url = new URL(`${GOUV_BASE}/search`);
 
-    if (q) url.searchParams.set('q', q);
+    // Le filtre « nom de l'entreprise contient » doit aussi être envoyé à
+    // Data.gouv : le filtrer uniquement après le téléchargement des pages
+    // donnait des résultats incohérents et remplissait inutilement le cache.
+    if (q || nom_contient) url.searchParams.set('q', q || nom_contient);
     if (code_postal) url.searchParams.set('code_postal', code_postal);
     if (section) url.searchParams.set('section_activite_principale', section);
     if (departement) url.searchParams.set('departement', departement);
