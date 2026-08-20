@@ -36,7 +36,7 @@ function normalizeCompany(company) {
     ...company,
     statut_google: googleStatus,
     categorie: company.categorie || categoryFromSize(company.tranche_effectif),
-    prospection_status: company.prospection_status || (googleStatus === 'CLOSED_PERMANENTLY' || googleStatus === 'CLOSED_TEMPORARILY' ? 'not_interested' : 'unspecified'),
+    prospection_status: company.prospection_status || (googleStatus === 'CLOSED_PERMANENTLY' || googleStatus === 'CLOSED_TEMPORARILY' ? 'processed' : 'unspecified'),
   };
 }
 
@@ -231,9 +231,9 @@ export default function App() {
 
   const patchCompany = useCallback(async (siren, patch) => {
     const withDecision = patch.statut_google === 'CLOSED_PERMANENTLY'
-      ? { ...patch, prospection_status: 'not_interested', prospection_reason: 'Google Places : fermé définitivement', prospection_updated_at: new Date().toISOString() }
+      ? { ...patch, prospection_status: 'processed', prospection_reason: 'Google Places : fermé définitivement', prospection_updated_at: new Date().toISOString() }
       : patch.statut_google === 'CLOSED_TEMPORARILY'
-        ? { ...patch, prospection_status: 'not_interested', prospection_reason: 'Google Places : fermé temporairement', prospection_updated_at: new Date().toISOString() }
+        ? { ...patch, prospection_status: 'processed', prospection_reason: 'Google Places : fermé temporairement', prospection_updated_at: new Date().toISOString() }
         : patch;
     setCompanies((previous) => previous.map((company) => company.siren === siren ? { ...company, ...withDecision } : company));
     setSelectedCompany((previous) => previous?.siren === siren ? { ...previous, ...withDecision } : previous);
@@ -254,14 +254,15 @@ export default function App() {
   }, [activeSearchParams, categoryFilter, excludeGroups, filterLegalHeadquarters]);
 
   const visible = companies.filter((company) => passesFilters(company, 'unspecified'));
-  const interested = companies.filter((company) => company.prospection_status === 'interested' && !isTemporarilyClosed(company));
-  const notInterested = companies.filter((company) => company.prospection_status === 'not_interested' && !isTemporarilyClosed(company));
+  const interested = companies.filter((company) => passesFilters(company, 'interested'));
+  const notInterested = companies.filter((company) => passesFilters(company, 'not_interested'));
   const activeCompanies = view === 'discover' ? visible : view === 'interested' ? interested : notInterested;
 
   const decide = useCallback((siren, status) => {
+    const finalStatus = status === 'not_interested' ? 'processed' : status;
     patchCompany(siren, {
-      prospection_status: status,
-      prospection_reason: status === 'unspecified' ? '' : 'Décision manuelle',
+      prospection_status: finalStatus,
+      prospection_reason: finalStatus === 'unspecified' ? '' : finalStatus === 'processed' ? 'Décision manuelle : pas intéressée' : 'Décision manuelle',
       prospection_updated_at: new Date().toISOString(),
     }).catch((err) => setError(`Sauvegarde : ${err.message}`));
     setSelected((previous) => {
@@ -314,7 +315,7 @@ export default function App() {
             company = { ...company, ...leaderPatch };
             await patchCompany(company.siren, leaderPatch);
           }
-          const status = hasIdentifiedLeader(company) ? 'interested' : 'not_interested';
+          const status = hasIdentifiedLeader(company) ? 'interested' : 'processed';
           await patchCompany(company.siren, {
             prospection_status: status,
             prospection_reason: hasIdentifiedLeader(company) ? 'Décision automatique : dirigeant identifié' : 'Décision automatique : aucun dirigeant personne physique identifié',
@@ -464,6 +465,8 @@ export default function App() {
     const sitesPatch = sitePatchFromSources(company, places, braveResult);
     company = { ...company, ...sitesPatch };
     await patchCompany(company.siren, sitesPatch);
+
+    await patchCompany(company.siren, { enriched_at: new Date().toISOString() });
 
     // Une entreprise fermée conserve tous ses retours Google/Brave/RH, mais
     // n'entame pas de crédit Dropcontact pour un contact à exclure.
@@ -639,6 +642,18 @@ export default function App() {
   }, [companies, refreshCacheStats]);
 
   const selectedInterested = interested.filter((company) => selected.has(company.siren));
+  const exportableInterested = selectedInterested.filter((company) => Boolean(company.enriched_at));
+  const handleInterestedExport = useCallback(async () => {
+    if (!exportableInterested.length) return;
+    exportInterestedXlsx(exportableInterested);
+    await Promise.all(exportableInterested.map((company) => patchCompany(company.siren, {
+      prospection_status: 'exported',
+      prospection_reason: 'Export XLSX',
+      prospection_updated_at: new Date().toISOString(),
+      exported_at: new Date().toISOString(),
+    })));
+    setSelected(new Set());
+  }, [exportableInterested, patchCompany]);
   return (
     <div className="min-h-screen bg-gray-50">
       <DetailPanel entreprise={selectedCompany} onClose={() => setSelectedCompany(null)} onUpdateEntreprise={patchCompany} />
@@ -693,7 +708,7 @@ export default function App() {
             <button type="button" onClick={() => setSelected(new Set())} className="text-sm text-gray-500 hover:underline">Tout désélectionner</button>
             <span className="text-sm text-gray-500">{selectedInterested.length} sélectionnée{selectedInterested.length > 1 ? 's' : ''}</span>
             <button type="button" disabled={!selectedInterested.length || enriching} onClick={handleEnrich} className="ml-auto px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-200 text-white font-semibold text-sm">{enriching ? 'Enrichissement en cours…' : 'Enrichir la sélection'}</button>
-            <button type="button" disabled={!selectedInterested.length} onClick={() => exportInterestedXlsx(selectedInterested)} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">Exporter XLSX</button>
+            <button type="button" disabled={!exportableInterested.length || enriching} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">Exporter XLSX{exportableInterested.length ? ` (${exportableInterested.length})` : ''}</button>
           </section>
         )}
 
