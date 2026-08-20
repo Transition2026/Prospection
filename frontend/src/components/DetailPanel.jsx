@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { findRHContact, resolveGooglePlace } from '../services/api';
+import { resolveGooglePlace } from '../services/api';
 
 const TAILLE_LABELS = {
   NN: '0 salarié',
@@ -55,8 +55,6 @@ function sitesEntreprise(entreprise) {
 }
 
 export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise }) {
-  const [findingRH, setFindingRH] = useState(false);
-  const [rhError, setRhError] = useState(null);
   const [resolvingPlace, setResolvingPlace] = useState(false);
   const [placeError, setPlaceError] = useState(null);
 
@@ -121,31 +119,6 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
       setResolvingPlace(false);
     }
   }
-
-
-  async function handleFindRH() {
-    setFindingRH(true);
-    setRhError(null);
-    try {
-      const result = await findRHContact({
-        nom: e.nom_entreprise,
-        enseigne: e.enseigne_etablissement,
-        ville: e.ville_etablissement || e.ville,
-        code_postal: e.code_postal_etablissement || e.code_postal,
-        site_web: e.site_web_google || e.site_web,
-      });
-      if (result.found && onUpdateEntreprise) {
-        onUpdateEntreprise(e.siren, { contact_rh: result.contact_rh });
-      } else if (!result.found) {
-        setRhError('Aucun contact RH trouvé');
-      }
-    } catch (err) {
-      setRhError(err.message);
-    } finally {
-      setFindingRH(false);
-    }
-  }
-
   const scoreColor =
     e.score >= 70
       ? 'bg-green-100 text-green-700 border-green-200'
@@ -361,36 +334,11 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
                 {e.contact_rh.description && (
                   <p className="text-xs text-gray-400 line-clamp-2 mt-1">{e.contact_rh.description}</p>
                 )}
+                <Field label="Email Dropcontact" value={e.contact_rh_email} />
+                <Field label="Téléphone Dropcontact" value={e.contact_rh_telephone} />
+                <Field label="Mobile Dropcontact" value={e.contact_rh_telephone_mobile} />
               </div>
-            ) : (
-              <div className="space-y-2">
-                <button
-                  onClick={handleFindRH}
-                  disabled={findingRH}
-                  className="flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-300 text-white text-sm font-medium rounded-lg transition-colors w-full justify-center"
-                >
-                  {findingRH ? (
-                    <>
-                      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                      </svg>
-                      Recherche en cours...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                      Chercher un contact RH
-                    </>
-                  )}
-                </button>
-                {rhError && (
-                  <p className="text-xs text-red-500 text-center">{rhError}</p>
-                )}
-              </div>
-            )}
+            ) : <p className="text-sm text-gray-500">La recherche de contact RH est lancée automatiquement pendant l’enrichissement.</p>}
           </Section>
 
           {/* Liens externes */}

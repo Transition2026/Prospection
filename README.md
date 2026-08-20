@@ -138,3 +138,32 @@ Appli searchPDG/
 ```
 
 Le `start.bat` compile automatiquement le frontend dans `backend/public/`, puis le serveur Express sert à la fois l'API et l'interface sur le port 3001.
+
+---
+
+## Créer l'application Windows (.exe)
+
+Cette cible utilise le même code React et Express : Electron démarre le backend local puis affiche l'interface dans une fenêtre Windows, sans navigateur ni fenêtre de commande.
+
+À faire **sur un PC Windows** (ne pas construire l'installeur Windows depuis le Mac) :
+
+```bat
+cd C:\chemin\vers\Prospection
+npm install
+cd backend && npm install
+cd ..\frontend && npm install
+cd ..
+npm run desktop:dist
+```
+
+L'installeur est créé dans `release\Prospection B2B-Setup-<version>.exe`.
+
+Pour créer un **seul fichier portable** à lancer par double-clic, utilise à la place :
+
+```bat
+npm run desktop:portable
+```
+
+Le fichier est créé dans `release\Prospection B2B-Setup-<version>.exe`. Au premier lancement, il ouvre l’écran « Configuration sécurisée » : colle les clés API puis valide. Elles sont chiffrées avec le coffre-fort Windows (DPAPI), ne sont pas ajoutées au `.exe`, ne sont jamais réaffichées et ne sont transmises qu’au backend local au démarrage.
+
+Pour tester la fenêtre Electron sans fabriquer l'exécutable, utilise `npm run desktop:dev`.

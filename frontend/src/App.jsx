@@ -3,6 +3,7 @@ import StatusBanner from './components/StatusBanner';
 import SearchForm from './components/SearchForm';
 import DetailPanel from './components/DetailPanel';
 import CompanyCards from './components/CompanyCards';
+import DesktopSettings from './components/DesktopSettings';
 import {
   checkStatus, enrichDropcontact, findRHContact, findWebsiteWithClaude,
   getDirigeantReel, resolveGooglePlace, searchEntreprises, sleep,
@@ -17,7 +18,7 @@ import { exportInterestedXlsx } from './services/xlsxExport';
 const ZERO_EMPLOYEE_CODES = new Set(['NN', '00']);
 const MICRO_CODES = new Set(['01', '02', '03']);
 const PME_CODES = new Set(['11', '12', '21', '22', '31']);
-const DEFAULT_CATEGORY_FILTER = { micro: true, pme: true, grande: false };
+const DEFAULT_CATEGORY_FILTER = { micro: false, pme: true, grande: false };
 const ENRICHMENT_CONCURRENCY = 4;
 const LEADER_RESOLUTION_CONCURRENCY = 4;
 const LEADER_RESOLVER_VERSION = 2;
@@ -68,6 +69,20 @@ function normalizedHost(url) {
   } catch {
     return '';
   }
+}
+
+function normalizedText(value) {
+  return (value || '').toLocaleLowerCase('fr-FR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizedNaf(value) {
+  return (value || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+}
+
+function hasIdentifiedLeader(company) {
+  return Boolean((company.prenom_dirigeant || '').trim() && (company.nom_dirigeant || '').trim());
 }
 
 function siteComparison(googleSite, braveSite) {
@@ -136,19 +151,18 @@ function isTemporarilyClosed(company) {
     || company.places_result?.statut === 'CLOSED_TEMPORARILY';
 }
 
-function isInSearchedArea(company, params) {
+function isInSearchedArea(company, params, filterLegalHeadquarters) {
   if (!params) return true;
   const establishmentPostalCode = company.code_postal_etablissement || '';
   const headquartersPostalCode = company.code_postal_legal || company.code_postal || '';
   if (params.code_postal) {
-    // Une recherche ville/CP n'accepte que les entreprises dont l'établissement
-    // et le siège légal sont tous les deux situés dans ce code postal.
-    return establishmentPostalCode === params.code_postal && headquartersPostalCode === params.code_postal;
+    if (establishmentPostalCode !== params.code_postal) return false;
+    return !filterLegalHeadquarters || headquartersPostalCode === params.code_postal;
   }
   const departements = params.departements || [];
   if (!departements.length) return true;
-  return departements.includes(establishmentPostalCode.slice(0, 2))
-    && departements.includes(headquartersPostalCode.slice(0, 2));
+  if (!departements.includes(establishmentPostalCode.slice(0, 2))) return false;
+  return !filterLegalHeadquarters || departements.includes(headquartersPostalCode.slice(0, 2));
 }
 
 function needsLeaderResolution(company) {
@@ -192,6 +206,7 @@ export default function App() {
   const [companies, setCompanies] = useState([]);
   const [categoryFilter, setCategoryFilter] = useState(DEFAULT_CATEGORY_FILTER);
   const [excludeGroups, setExcludeGroups] = useState(true);
+  const [filterLegalHeadquarters, setFilterLegalHeadquarters] = useState(true);
   const [activeSearchParams, setActiveSearchParams] = useState(null);
   const [view, setView] = useState('discover');
   const [selected, setSelected] = useState(new Set());
@@ -201,6 +216,8 @@ export default function App() {
   const [error, setError] = useState(null);
   const [enriching, setEnriching] = useState(false);
   const [enrichment, setEnrichment] = useState(null);
+  const [autoDeciding, setAutoDeciding] = useState(false);
+  const [autoDecisionProgress, setAutoDecisionProgress] = useState(null);
   const [cacheStats, setCacheStats] = useState({ companies: 0, pages: 0 });
   const cancelSearchRef = useRef(false);
   const importInputRef = useRef(null);
@@ -230,9 +247,11 @@ export default function App() {
     if (ZERO_EMPLOYEE_CODES.has(company.tranche_effectif)) return false;
     if (!categoryFilter[company.categorie || categoryFromSize(company.tranche_effectif)]) return false;
     if (excludeGroups && company.nb_etablissements > 35) return false;
-    if (!isInSearchedArea(company, searchParams)) return false;
+    if (searchParams?.nom_contient && !normalizedText(company.nom_entreprise).includes(normalizedText(searchParams.nom_contient))) return false;
+    if (searchParams?.naf_prefix && !normalizedNaf(company.code_naf).startsWith(normalizedNaf(searchParams.naf_prefix))) return false;
+    if (!isInSearchedArea(company, searchParams, filterLegalHeadquarters)) return false;
     return true;
-  }, [activeSearchParams, categoryFilter, excludeGroups]);
+  }, [activeSearchParams, categoryFilter, excludeGroups, filterLegalHeadquarters]);
 
   const visible = companies.filter((company) => passesFilters(company, 'unspecified'));
   const interested = companies.filter((company) => company.prospection_status === 'interested' && !isTemporarilyClosed(company));
@@ -272,6 +291,46 @@ export default function App() {
       }
     });
   }, [patchCompany]);
+
+  const handleAutomaticDecision = useCallback(async () => {
+    const targets = visible;
+    if (!targets.length || autoDeciding) return;
+    setAutoDeciding(true);
+    setError(null);
+    const progress = { total: targets.length, completed: 0, skipped: 0 };
+    setAutoDecisionProgress({ ...progress });
+    try {
+      await runWithConcurrency(targets, LEADER_RESOLUTION_CONCURRENCY, async (initial) => {
+        let company = initial;
+        try {
+          if (needsLeaderResolution(company)) {
+            const result = await getDirigeantReel(company.siren);
+            // Une erreur technique Data.gouv ne vaut pas une décision négative.
+            if (['fetch', 'api_error'].includes(result.raison)) {
+              progress.skipped += 1;
+              return;
+            }
+            const leaderPatch = leaderPatchFromResult(result);
+            company = { ...company, ...leaderPatch };
+            await patchCompany(company.siren, leaderPatch);
+          }
+          const status = hasIdentifiedLeader(company) ? 'interested' : 'not_interested';
+          await patchCompany(company.siren, {
+            prospection_status: status,
+            prospection_reason: hasIdentifiedLeader(company) ? 'Décision automatique : dirigeant identifié' : 'Décision automatique : aucun dirigeant personne physique identifié',
+            prospection_updated_at: new Date().toISOString(),
+          });
+        } catch {
+          progress.skipped += 1;
+        } finally {
+          progress.completed += 1;
+          setAutoDecisionProgress({ ...progress });
+        }
+      });
+    } finally {
+      setAutoDeciding(false);
+    }
+  }, [autoDeciding, patchCompany, visible]);
 
   const handleSearch = useCallback(async (params) => {
     cancelSearchRef.current = false;
@@ -410,42 +469,106 @@ export default function App() {
     // n'entame pas de crédit Dropcontact pour un contact à exclure.
     if (company.statut_google === 'CLOSED_PERMANENTLY' || company.statut_google === 'CLOSED_TEMPORARILY') return;
 
-    const target = personFromRh(company.contact_rh) || (company.nom_dirigeant ? { prenom: company.prenom_dirigeant, nom: company.nom_dirigeant } : null);
-    if (company.email) return;
+    const leaderTarget = hasIdentifiedLeader(company)
+      ? { prenom: company.prenom_dirigeant, nom: company.nom_dirigeant, poste: company.qualite_dirigeant || '' }
+      : null;
+    const rhTarget = personFromRh(company.contact_rh);
+    const legacyLeaderEnriched = company.contact_email_source === 'Dirigeant + Dropcontact' && Boolean(company.emailStatus);
+    const leaderNeedsEnrichment = leaderTarget && !company.leader_emailStatus && !legacyLeaderEnriched;
+    const rhNeedsEnrichment = rhTarget && !company.contact_rh_emailStatus;
+    const organizationNeedsEnrichment = !leaderTarget && !rhTarget && !company.emailStatus;
+    if (!leaderNeedsEnrichment && !rhNeedsEnrichment && !organizationNeedsEnrichment) return;
+
+    const enrichTarget = async (target) => enrichDropcontact({
+      prenom: target?.prenom || '',
+      nom: target?.nom || '',
+      entreprise: company.nom_entreprise,
+      site_web: company.site_web,
+      siren: company.siren,
+      siret: company.siret_etablissement || company.siret_siege || '',
+      pays: 'FR',
+      poste: target?.poste || '',
+      linkedin: target?.linkedin || '',
+      telephone: company.telephone_google || '',
+    });
+
     try {
-      const result = await enrichDropcontact({
-        prenom: target?.prenom || '',
-        nom: target?.nom || '',
-        entreprise: company.nom_entreprise,
-        site_web: company.site_web,
-        siren: company.siren,
-        siret: company.siret_etablissement || company.siret_siege || '',
-        pays: 'FR',
-        poste: target?.poste || company.qualite_dirigeant || '',
-        linkedin: target?.linkedin || '',
-        telephone: company.telephone_google || '',
-      });
-      const dropcontactPatch = {
-        site_web_dropcontact: result.website || result.enrichment?.website || '',
-        linkedin_contact: result.linkedin || result.enrichment?.linkedin || '',
-        company_dropcontact: result.company || result.enrichment?.company || '',
-        dropcontact_result: result.enrichment || null,
-      };
-      if (result.found) {
-        stats.emails_trouves += 1;
-        await patchCompany(company.siren, {
-          ...dropcontactPatch,
-          email: result.email,
-          score: result.score,
-          email_qualification: result.qualification || '',
-          telephone: result.telephone || '',
-          telephone_mobile: result.telephone_mobile || '',
-          emailStatus: 'found',
-          contact_email_source: company.contact_rh ? 'RH Brave Search + Dropcontact' : target ? 'Dirigeant + Dropcontact' : 'Organisation + Dropcontact',
-        });
-      } else {
-        await patchCompany(company.siren, { ...dropcontactPatch, emailStatus: 'not_found' });
+      // Lorsqu'un RH est identifié, les deux demandes sont indépendantes et
+      // partent ensemble : aucune identité ne prend la place de l'autre.
+      const outcomes = await Promise.allSettled([
+        leaderNeedsEnrichment ? enrichTarget(leaderTarget) : Promise.resolve(null),
+        rhNeedsEnrichment ? enrichTarget(rhTarget) : Promise.resolve(null),
+        organizationNeedsEnrichment ? enrichTarget(null) : Promise.resolve(null),
+      ]);
+      outcomes.filter((outcome) => outcome.status === 'rejected').forEach(() => { stats.echecs += 1; });
+      const [leaderResult, rhResult, organizationResult] = outcomes.map((outcome) => outcome.status === 'fulfilled' ? outcome.value : null);
+      const primaryResult = leaderResult || rhResult || organizationResult;
+      const patch = primaryResult ? {
+        site_web_dropcontact: primaryResult.website || primaryResult.enrichment?.website || '',
+        company_dropcontact: primaryResult.company || primaryResult.enrichment?.company || '',
+      } : {};
+
+      if (leaderResult) {
+        patch.dropcontact_result_leader = leaderResult.enrichment || null;
+        patch.leader_emailStatus = leaderResult.found ? 'found' : 'not_found';
+        if (leaderResult.found) {
+          stats.emails_trouves += 1;
+          Object.assign(patch, {
+            leader_email: leaderResult.email,
+            leader_score: leaderResult.score,
+            leader_email_qualification: leaderResult.qualification || '',
+            leader_telephone: leaderResult.telephone || '',
+            leader_telephone_mobile: leaderResult.telephone_mobile || '',
+            // Le contact principal reste le dirigeant quand les deux existent.
+            email: leaderResult.email,
+            score: leaderResult.score,
+            email_qualification: leaderResult.qualification || '',
+            telephone: leaderResult.telephone || '',
+            telephone_mobile: leaderResult.telephone_mobile || '',
+            emailStatus: 'found',
+            contact_email_source: 'Dirigeant + Dropcontact',
+          });
+        }
       }
+      if (rhResult) {
+        patch.dropcontact_result_rh = rhResult.enrichment || null;
+        patch.contact_rh_emailStatus = rhResult.found ? 'found' : 'not_found';
+        if (rhResult.found) {
+          stats.emails_trouves += 1;
+          Object.assign(patch, {
+            contact_rh_email: rhResult.email,
+            contact_rh_score: rhResult.score,
+            contact_rh_email_qualification: rhResult.qualification || '',
+            contact_rh_telephone: rhResult.telephone || '',
+            contact_rh_telephone_mobile: rhResult.telephone_mobile || '',
+          });
+          if (!leaderResult?.found) Object.assign(patch, {
+            email: rhResult.email,
+            score: rhResult.score,
+            email_qualification: rhResult.qualification || '',
+            telephone: rhResult.telephone || '',
+            telephone_mobile: rhResult.telephone_mobile || '',
+            emailStatus: 'found',
+            contact_email_source: 'RH Brave Search + Dropcontact',
+          });
+        }
+      }
+      if (organizationResult) {
+        patch.dropcontact_result = organizationResult.enrichment || null;
+        patch.emailStatus = organizationResult.found ? 'found' : 'not_found';
+        if (organizationResult.found) {
+          stats.emails_trouves += 1;
+          Object.assign(patch, {
+            email: organizationResult.email,
+            score: organizationResult.score,
+            email_qualification: organizationResult.qualification || '',
+            telephone: organizationResult.telephone || '',
+            telephone_mobile: organizationResult.telephone_mobile || '',
+            contact_email_source: 'Organisation + Dropcontact',
+          });
+        }
+      }
+      await patchCompany(company.siren, patch);
     } catch { stats.echecs += 1; }
   }, [patchCompany]);
 
@@ -496,6 +619,15 @@ export default function App() {
     if (!file) return;
     try {
       const merged = await importCompanyCache(JSON.parse(await file.text()));
+      // Réhydrate immédiatement la liste déjà affichée : sans cela les décisions
+      // importées ne sont appliquées qu'à la recherche suivante et des fiches
+      // déjà traitées restent à tort dans « À traiter ».
+      const hydratedCurrent = (await hydrateCompanies(companies)).map(normalizeCompany);
+      setCompanies(hydratedCurrent);
+      setSelectedCompany((current) => {
+        if (!current) return current;
+        return hydratedCurrent.find((company) => company.siren === current.siren) || current;
+      });
       await refreshCacheStats();
       setError(null);
       window.alert(`${merged} élément(s) de cache fusionné(s).`);
@@ -504,7 +636,7 @@ export default function App() {
     } finally {
       event.target.value = '';
     }
-  }, [refreshCacheStats]);
+  }, [companies, refreshCacheStats]);
 
   const selectedInterested = interested.filter((company) => selected.has(company.siren));
   return (
@@ -528,8 +660,9 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
         <StatusBanner status={apiStatus} />
+        <DesktopSettings onSaved={() => checkStatus().then(setApiStatus).catch(() => setApiStatus({ ok: false, message: 'Backend indisponible.' }))} />
         {error && <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
-        <SearchForm onSearch={handleSearch} loading={searching} categoryFilter={categoryFilter} onCategoryChange={setCategoryFilter} exclureGroupes={excludeGroups} onExclureGroupesChange={setExcludeGroups} cacheOnly={false} />
+        <SearchForm onSearch={handleSearch} loading={searching} categoryFilter={categoryFilter} onCategoryChange={setCategoryFilter} exclureGroupes={excludeGroups} onExclureGroupesChange={setExcludeGroups} filterLegalHeadquarters={filterLegalHeadquarters} onFilterLegalHeadquartersChange={setFilterLegalHeadquarters} cacheOnly={false} />
 
         {searchProgress && (
           <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex flex-wrap items-center gap-3">
@@ -543,6 +676,16 @@ export default function App() {
             <button key={key} type="button" onClick={() => { setView(key); if (key !== 'interested') setSelected(new Set()); }} className={`px-4 py-2 rounded-full text-sm font-medium ${view === key ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600'}`}>{label}</button>
           ))}
         </nav>
+
+        {view === 'discover' && visible.length > 0 && (
+          <section className="rounded-2xl bg-white border border-gray-200 p-4 flex flex-wrap items-center gap-3">
+            <p className="text-sm text-gray-600">Classe les fiches selon l’existence d’un dirigeant personne physique (hors commissaire aux comptes).</p>
+            <button type="button" disabled={autoDeciding} onClick={handleAutomaticDecision} className="ml-auto px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-200 text-white font-semibold text-sm">
+              {autoDeciding ? `Décision automatique… (${autoDecisionProgress?.completed || 0}/${autoDecisionProgress?.total || visible.length})` : `Intéressée / pas intéressée auto (${visible.length})`}
+            </button>
+            {!autoDeciding && autoDecisionProgress?.skipped > 0 && <span className="text-xs text-amber-700">{autoDecisionProgress.skipped} fiche(s) non classée(s) : Data.gouv indisponible.</span>}
+          </section>
+        )}
 
         {view === 'interested' && (
           <section className="rounded-2xl bg-white border border-gray-200 p-4 flex flex-wrap items-center gap-3">

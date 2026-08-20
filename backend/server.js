@@ -1,7 +1,10 @@
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+
+// En mode web classique, les variables restent lues depuis backend/.env.
+// L'application Electron les injecte directement depuis le coffre-fort système.
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const entreprisesRoutes = require('./routes/entreprises');
 const hunterRoutes = require('./routes/hunter');

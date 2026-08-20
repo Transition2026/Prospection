@@ -17,7 +17,7 @@ function PlaceStatus({ company }) {
 export default function CompanyCard({ company, onDecision, onOpen, selectable = false, selected = false, onToggleSelect }) {
   const prenom = (company.prenom_dirigeant || '').trim();
   const nom = (company.nom_dirigeant || '').trim();
-  const dirigeant = [prenom ? `${prenom[0]}.` : '', nom].filter(Boolean).join(' ');
+  const dirigeant = [prenom, nom].filter(Boolean).join(' ');
   const dirigeantLabel = dirigeant || (company.dirigeant_raison ? 'Aucun mandataire hors commissaire' : 'Recherche en cours…');
   return (
     <article className="bg-white border border-gray-200 rounded-2xl shadow-sm p-5 flex flex-col gap-4 hover:border-blue-300 transition-colors">
@@ -33,12 +33,12 @@ export default function CompanyCard({ company, onDecision, onOpen, selectable = 
       </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-        <div>
+        <div className="col-span-2">
           <p className="text-xs text-gray-400">Dirigeant</p>
           <p className="text-gray-800 break-words">{dirigeantLabel}</p>
           {company.qualite_dirigeant && <p className="text-xs text-gray-500">{company.qualite_dirigeant}</p>}
         </div>
-        <div>
+        <div className="col-span-2">
           <p className="text-xs text-gray-400">Effectif</p>
           <p className="text-gray-800">{TAILLE_LABELS[company.tranche_effectif] || 'Non renseigné'}</p>
         </div>

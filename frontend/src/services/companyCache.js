@@ -78,6 +78,8 @@ export function createSearchSignature(params) {
     departements: [...(params.departements || [])].sort(),
     sections: [...(params.sections || [])].sort(),
     code_postal: params.code_postal || '',
+    nom_contient: params.nom_contient || '',
+    naf_prefix: params.naf_prefix || '',
   });
 }
 

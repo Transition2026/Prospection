@@ -1,0 +1,13 @@
+{
+  "name": "Prospection B2B",
+  "builder": "windows-ci",
+  "entry": "desktop/main.js",
+  "architecture": "amd64",
+  "output_dir": "release",
+  "windows_steps": [
+    "npm ci",
+    "npm ci --prefix backend",
+    "npm ci --prefix frontend",
+    "npm run desktop:dist"
+  ]
+}

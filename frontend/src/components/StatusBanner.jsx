@@ -13,10 +13,7 @@ export default function StatusBanner({ status }) {
       <div>
         <p className="font-semibold">Configuration incomplète</p>
         <p className="text-sm mt-0.5">{status.message}</p>
-        <p className="text-sm mt-1">
-          Renseignez les clés manquantes dans le fichier{' '}
-          <code className="bg-red-100 px-1 rounded">backend/.env</code> puis redémarrez le serveur.
-        </p>
+        <p className="text-sm mt-1">Renseignez les clés manquantes dans la configuration de l’application, puis redémarrez-la si nécessaire.</p>
       </div>
     </div>
   );

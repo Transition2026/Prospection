@@ -2,15 +2,52 @@
   "name": "appli-searchpdg",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "desktop/main.js",
   "scripts": {
-    "dev": "concurrently --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\""
+    "dev": "concurrently --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "desktop:dev": "npm run build --prefix frontend && electron .",
+    "desktop:dist": "npm run build --prefix frontend && electron-builder --win nsis --x64",
+    "desktop:portable": "npm run build --prefix frontend && electron-builder --win portable --x64"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "build": {
+    "appId": "fr.transition2026.prospectionb2b",
+    "productName": "Prospection B2B",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!.env",
+          "!node_modules/.cache/**",
+          "!*.log"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3"
   }
 }
