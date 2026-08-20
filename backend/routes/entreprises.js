@@ -4,30 +4,53 @@ const router = express.Router();
 const GOUV_BASE = 'https://recherche-entreprises.api.gouv.fr';
 const MAX_REMONTEES = 5;
 
-// Priorité des qualités dirigeants : les vrais dirigeants avant les CAC et autres
+function adresseEtablissement(etablissement = {}) {
+  return etablissement.adresse || etablissement.adresse_complete || '';
+}
+
+function villeEtablissement(etablissement = {}) {
+  return etablissement.libelle_commune || etablissement.commune || '';
+}
+
+function enseigneEtablissement(etablissement = {}) {
+  return etablissement.enseigne
+    || etablissement.nom_commercial
+    || (Array.isArray(etablissement.liste_enseignes) ? etablissement.liste_enseignes[0] : '')
+    || '';
+}
+
+// `matching_etablissements` représente le lieu qui a motivé le résultat de
+// recherche Data.gouv. Il est plus utile à la prospection qu'un siège de groupe.
+function choisirEtablissementCible(entreprise = {}) {
+  const etablissements = Array.isArray(entreprise.matching_etablissements)
+    ? entreprise.matching_etablissements
+    : [];
+  return etablissements.find((e) => (e.etat_administratif || 'A') === 'A') || etablissements[0] || null;
+}
+
+// Les commissaires aux comptes ne sont pas des interlocuteurs de prospection.
+// Tous les autres mandataires sont conservés : certaines petites structures ne
+// déclarent ni président ni gérant malgré la présence d'une personne physique.
 function prioriteDirigeant(qualite) {
   const q = (qualite || '').toLowerCase();
-  if (q.includes('président') || q.includes('president')) return 1;
+  if (q.includes('commissaire')) return null;
+  if (q.includes('président') || q.includes('president') || q.includes('pdg')) return 1;
   if (q.includes('gérant') || q.includes('gerant')) return 2;
-  if (q.includes('directeur général') || q.includes('directeur general') || q.includes('dg ') || q === 'dg') return 3;
-  if (q.includes('directeur')) return 4;
-  if (q.includes('pdg')) return 5;
-  if (q.includes('administrateur')) return 6;
-  if (q.includes('associé') || q.includes('associe')) return 7;
-  if (q.includes('commissaire aux comptes') || q.includes('commissaire aux compte')) return 99;
-  if (q.includes('commissaire')) return 98;
-  return 50;
+  if (q.includes('directeur général') || q.includes('directeur general') || q === 'dg') return 3;
+  return 10;
 }
 
 function trierDirigeants(dirigeants) {
-  return [...(dirigeants || [])].sort((a, b) => {
-    // Priorité 1 : vraie personne (a un prénom) avant une société/groupe
-    const aPersonne = a.prenoms ? 0 : 1;
-    const bPersonne = b.prenoms ? 0 : 1;
-    if (aPersonne !== bPersonne) return aPersonne - bPersonne;
-    // Priorité 2 : qualité du rôle
-    return prioriteDirigeant(a.qualite) - prioriteDirigeant(b.qualite);
-  });
+  return [...(dirigeants || [])]
+    .filter((dirigeant) => prioriteDirigeant(dirigeant.qualite) !== null)
+    .sort((a, b) => {
+      // Priorité 1 : vraie personne (a un prénom) avant une société/groupe
+      const aPersonne = a.prenoms ? 0 : 1;
+      const bPersonne = b.prenoms ? 0 : 1;
+      if (aPersonne !== bPersonne) return aPersonne - bPersonne;
+      // Priorité 2 : qualité du rôle
+      return prioriteDirigeant(a.qualite) - prioriteDirigeant(b.qualite);
+    });
 }
 
 async function remonterDirigeant(siren, visited = new Set(), depth = 0) {
@@ -48,25 +71,28 @@ async function remonterDirigeant(siren, visited = new Set(), depth = 0) {
   if (!entreprise) return { found: false, remontees: depth, raison: 'non_trouvee' };
 
   const tries = trierDirigeants(entreprise.dirigeants);
-  const top = tries[0];
-  if (!top) return { found: false, remontees: depth, raison: 'aucun_dirigeant' };
+  if (tries.length === 0) return { found: false, remontees: depth, raison: 'aucun_mandataire_hors_commissaire' };
 
-  if (top.prenoms) {
+  // On recherche d'abord une personne physique au niveau courant, puis chaque
+  // mandataire personne morale éligible. L'ancien code ne suivait que le premier.
+  const personnePhysique = tries.find((dirigeant) => dirigeant.prenoms);
+  if (personnePhysique) {
     return {
       found: true,
-      prenom: top.prenoms,
-      nom: top.nom || '',
-      qualite: top.qualite || '',
+      prenom: personnePhysique.prenoms,
+      nom: personnePhysique.nom || '',
+      qualite: personnePhysique.qualite || '',
       remontees: depth,
     };
   }
 
-  // Dirigeant est une personne morale — remonter d'un cran
-  if (top.siren) {
-    return remonterDirigeant(top.siren, visited, depth + 1);
+  for (const dirigeant of tries) {
+    if (!dirigeant.siren) continue;
+    const resultat = await remonterDirigeant(dirigeant.siren, visited, depth + 1);
+    if (resultat.found) return resultat;
   }
 
-  return { found: false, remontees: depth, raison: 'dirigeant_sans_siren' };
+  return { found: false, remontees: depth, raison: 'dirigeant_personne_morale_non_resolu' };
 }
 
 // GET /api/entreprises/search
@@ -101,21 +127,41 @@ router.get('/search', async (req, res) => {
     let entreprises = (data.results || []).map((e) => {
       const dirigeantsTries = trierDirigeants(e.dirigeants);
       const dirigeant = dirigeantsTries[0] || {};
+      const etablissement = choisirEtablissementCible(e);
       const tousLesDirigeants = dirigeantsTries.map((d) => ({
         prenoms: d.prenoms || '',
         nom: d.nom || d.denomination || '',
         qualite: d.qualite || '',
+        siren: d.siren || '',
         date_naissance: d.annee_de_naissance ? `${d.annee_de_naissance}` : '',
       }));
       return {
         siren: e.siren,
         nom_entreprise: e.nom_complet || '',
+        // La fiche source complète est gardée dans IndexedDB avec le résultat
+        // normalisé, y compris si elle est ensuite masquée par un filtre UI.
+        data_gouv_brut: e,
         prenom_dirigeant: dirigeant.prenoms || '',
         nom_dirigeant: dirigeant.nom || dirigeant.denomination || '',
         qualite_dirigeant: dirigeant.qualite || '',
+        siren_dirigeant: dirigeant.siren || '',
         dirigeants: tousLesDirigeants,
+        // Donnée légale : ne jamais l'écraser avec un résultat Google Places.
+        adresse_legale: e.siege?.adresse || '',
+        code_postal_legal: e.siege?.code_postal || '',
+        ville_legale: villeEtablissement(e.siege),
+        siret_siege: e.siege?.siret || '',
+        // Donnée issue du filtre/recherche Data.gouv : point de départ Places.
+        adresse_etablissement: adresseEtablissement(etablissement),
+        code_postal_etablissement: etablissement?.code_postal || '',
+        ville_etablissement: villeEtablissement(etablissement),
+        siret_etablissement: etablissement?.siret || '',
+        enseigne_etablissement: enseigneEtablissement(etablissement),
+        latitude_etablissement: etablissement?.latitude || etablissement?.coordonnees?.latitude || null,
+        longitude_etablissement: etablissement?.longitude || etablissement?.coordonnees?.longitude || null,
+        // Compatibilité avec le frontend actuel : il continue à afficher le siège.
         code_postal: e.siege?.code_postal || '',
-        ville: e.siege?.libelle_commune || e.siege?.commune || '',
+        ville: villeEtablissement(e.siege),
         adresse: e.siege?.adresse || '',
         date_creation: e.date_creation || '',
         nature_juridique: e.nature_juridique || '',
@@ -132,7 +178,14 @@ router.get('/search', async (req, res) => {
     entreprises = entreprises.filter((e) => e._etat === 'A');
     entreprises.forEach((e) => delete e._etat);
 
-    res.json({ total: entreprises.length, entreprises });
+    res.json({
+      total: entreprises.length,
+      total_results: data.total_results ?? null,
+      total_pages: data.total_pages ?? null,
+      page: Number(data.page || page),
+      has_more: data.total_pages ? Number(data.page || page) < Number(data.total_pages) : entreprises.length > 0,
+      entreprises,
+    });
   } catch (err) {
     console.error('Erreur /api/entreprises/search:', err);
     res.status(500).json({ error: 'Erreur interne du serveur' });

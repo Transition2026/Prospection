@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { findWebsiteWithClaude, findRHContact } from '../services/api';
+import { resolveGooglePlace } from '../services/api';
 
 const TAILLE_LABELS = {
   NN: '0 salarié',
@@ -39,11 +39,24 @@ function Field({ label, value }) {
   );
 }
 
+function sitesEntreprise(entreprise) {
+  const byUrl = new Map();
+  const add = (url, source) => {
+    if (!url) return;
+    const key = url.replace(/\/$/, '').toLowerCase();
+    const previous = byUrl.get(key);
+    byUrl.set(key, previous ? { ...previous, sources: [...previous.sources, source] } : { url, sources: [source] });
+  };
+  add(entreprise.site_web_google, 'Google Places');
+  add(entreprise.site_web_brave, 'Brave Search');
+  add(entreprise.site_web_dropcontact, 'Dropcontact');
+  add(entreprise.site_web, entreprise.site_source || 'Site retenu');
+  return [...byUrl.values()];
+}
+
 export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise }) {
-  const [findingWebsite, setFindingWebsite] = useState(false);
-  const [websiteError, setWebsiteError] = useState(null);
-  const [findingRH, setFindingRH] = useState(false);
-  const [rhError, setRhError] = useState(null);
+  const [resolvingPlace, setResolvingPlace] = useState(false);
+  const [placeError, setPlaceError] = useState(null);
 
   // Fermer avec Escape
   useEffect(() => {
@@ -57,6 +70,7 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
   if (!entreprise) return null;
 
   const e = entreprise;
+  const sites = sitesEntreprise(e);
 
   function copyEmail() {
     if (e.email) navigator.clipboard.writeText(e.email).catch(() => {});
@@ -66,46 +80,45 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
     navigator.clipboard.writeText(text).catch(() => {});
   }
 
-  async function handleFindWebsite() {
-    setFindingWebsite(true);
-    setWebsiteError(null);
+  async function handleResolveGooglePlace() {
+    setResolvingPlace(true);
+    setPlaceError(null);
     try {
-      const result = await findWebsiteWithClaude({
+      const result = await resolveGooglePlace({
         nom: e.nom_entreprise,
-        ville: e.ville,
-        code_postal: e.code_postal,
-        siren: e.siren,
+        enseigne: e.enseigne_etablissement,
+        adresse: e.adresse_etablissement || e.adresse_legale || e.adresse,
+        code_postal: e.code_postal_etablissement || e.code_postal_legal || e.code_postal,
+        ville: e.ville_etablissement || e.ville_legale || e.ville,
+        latitude: e.latitude_etablissement,
+        longitude: e.longitude_etablissement,
       });
-      if (result.found && onUpdateEntreprise) {
-        onUpdateEntreprise(e.siren, { site_web: result.site_web });
-      } else if (!result.found) {
-        setWebsiteError('Site web introuvable');
-      }
+      onUpdateEntreprise?.(e.siren, {
+        places_result: result,
+        place_id: result.place_id,
+        place_score: result.score ?? result.candidats?.[0]?.score ?? null,
+        place_date_controle: result.date_controle || new Date().toISOString(),
+        nom_google: result.nom_google || '',
+        adresse_google: result.adresse_google || '',
+        telephone_google: result.telephone_public || '',
+        site_web_google: result.site_web || '',
+        site_web: result.site_web || e.site_web,
+        site_source: result.site_web ? 'Google Places' : e.site_source,
+        statut_google: result.statut || '',
+        place_score_initial: result.score ?? result.candidats?.[0]?.score ?? null,
+        place_fiabilite: result.fiabilite || result.candidat_retenu?.fiabilite || null,
+        place_match_confirme: Boolean(result.match_confirme),
+        latitude_google: result.latitude ?? null,
+        longitude_google: result.longitude ?? null,
+      });
+      if (!result.found) setPlaceError('Google n’a renvoyé aucun établissement exploitable. Les candidats sont conservés dans le cache.');
+      else if (!result.match_confirme) setPlaceError('Proposition Google conservée : la correspondance avec Data.gouv est à vérifier.');
     } catch (err) {
-      setWebsiteError(err.message);
+      setPlaceError(err.message);
     } finally {
-      setFindingWebsite(false);
+      setResolvingPlace(false);
     }
   }
-
-
-  async function handleFindRH() {
-    setFindingRH(true);
-    setRhError(null);
-    try {
-      const result = await findRHContact({ nom: e.nom_entreprise, ville: e.ville, code_postal: e.code_postal });
-      if (result.found && onUpdateEntreprise) {
-        onUpdateEntreprise(e.siren, { contact_rh: result.contact_rh });
-      } else if (!result.found) {
-        setRhError('Aucun contact RH trouvé');
-      }
-    } catch (err) {
-      setRhError(err.message);
-    } finally {
-      setFindingRH(false);
-    }
-  }
-
   const scoreColor =
     e.score >= 70
       ? 'bg-green-100 text-green-700 border-green-200'
@@ -184,7 +197,7 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
                 </div>
               ) : (
                 <p className="text-sm text-gray-400 italic">
-                  {e.emailStatus === 'not_found' ? 'Email non trouvé via Hunter' : 'Site web non disponible'}
+                  {e.emailStatus === 'not_found' ? 'Email non trouvé via Dropcontact' : 'Site web non disponible'}
                 </p>
               )}
             </div>
@@ -192,14 +205,55 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
 
           {/* Informations générales */}
           <Section title="Informations générales">
-            <Field label="Siège social" value={e.adresse || [e.code_postal, e.ville].filter(Boolean).join(' ')} />
-            <Field label="Code postal" value={e.code_postal} />
-            <Field label="Ville" value={e.ville} />
+            <Field label="Siège légal" value={e.adresse_legale || e.adresse || [e.code_postal_legal || e.code_postal, e.ville_legale || e.ville].filter(Boolean).join(' ')} />
+            <Field label="Établissement Data.gouv" value={e.adresse_etablissement || ''} />
+            <Field label="SIRET établissement" value={e.siret_etablissement || ''} />
             <Field label="Date de création" value={e.date_creation ? new Date(e.date_creation).toLocaleDateString('fr-FR') : ''} />
             <Field label="Forme juridique" value={e.nature_juridique} />
             <Field label="Secteur (NAF)" value={e.libelle_code_naf ? `${e.libelle_code_naf} (${e.code_naf})` : e.code_naf} />
             <Field label="Effectif" value={TAILLE_LABELS[e.tranche_effectif] || (e.tranche_effectif ? `Code ${e.tranche_effectif}` : '')} />
             <Field label="Établissements ouverts" value={e.nb_etablissements ? String(e.nb_etablissements) : ''} />
+          </Section>
+
+          <Section title="Établissement Google Places">
+            {e.place_id ? (
+              <>
+                <Field label="Établissement" value={e.nom_google} />
+                <Field label="Adresse confirmée" value={e.adresse_google} />
+                <Field label="Téléphone public" value={e.telephone_google} />
+                <Field label="Statut" value={e.statut_google} />
+                <Field label="Fiabilité" value={e.place_score !== undefined ? `${e.place_score}/100` : ''} />
+                <Field label="Correspondance" value={e.place_match_confirme ? 'Confirmée' : 'Proposition à vérifier'} />
+                <Field label="Validation Brave" value={e.sites_comparaison === 'concordants' ? 'Site cohérent' : e.sites_comparaison === 'differents' ? 'Site différent' : ''} />
+                <Field label="Contrôlé le" value={e.place_date_controle ? new Date(e.place_date_controle).toLocaleDateString('fr-FR') : ''} />
+              </>
+            ) : e.places_result ? (
+              <div className="space-y-2 rounded-lg bg-gray-50 px-4 py-3">
+                <Field label="Statut" value={e.statut_google || e.places_result.statut || e.places_result.raison || 'Non confirmé'} />
+                <Field label="Fiabilité" value={e.place_score ?? e.places_result.score ?? e.places_result.candidat_retenu?.score ?? ''} />
+                <Field label="Candidats conservés" value={String(e.places_result.candidats?.length || 0)} />
+                <Field label="Contrôlé le" value={e.place_date_controle ? new Date(e.place_date_controle).toLocaleDateString('fr-FR') : ''} />
+                <button
+                  onClick={handleResolveGooglePlace}
+                  disabled={resolvingPlace}
+                  className="mt-1 text-sm text-blue-600 hover:underline disabled:text-gray-400"
+                >
+                  {resolvingPlace ? 'Vérification Google Places...' : 'Relancer la vérification'}
+                </button>
+                {placeError && <p className="text-xs text-red-500">{placeError}</p>}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <button
+                  onClick={handleResolveGooglePlace}
+                  disabled={resolvingPlace}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-700 disabled:bg-red-300 text-white text-sm font-medium rounded-lg transition-colors w-full justify-center"
+                >
+                  {resolvingPlace ? 'Vérification Google Places...' : 'Vérifier l’établissement avec Google Places'}
+                </button>
+                {placeError && <p className="text-xs text-red-500 text-center">{placeError}</p>}
+              </div>
+            )}
           </Section>
 
           {/* Dirigeants */}
@@ -225,56 +279,33 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
             </Section>
           )}
 
-          {/* Site web */}
-          <Section title="Site web">
-            {e.site_web ? (
-              <div className="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3">
-                <a
-                  href={e.site_web.startsWith('http') ? e.site_web : `https://${e.site_web}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-blue-600 hover:underline break-all"
-                >
-                  {e.site_web}
-                </a>
+          {/* Sites web */}
+          <Section title="Sites web">
+            {sites.length > 0 ? sites.map((site) => (
+              <div key={site.url} className="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3">
+                <div className="min-w-0">
+                  <p className="text-xs text-gray-400 mb-0.5">{site.sources.join(' + ')}</p>
+                  <a
+                    href={site.url.startsWith('http') ? site.url : `https://${site.url}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-blue-600 hover:underline break-all"
+                  >
+                    {site.url}
+                  </a>
+                </div>
                 <button
-                  onClick={() => copyText(e.site_web)}
+                  onClick={() => copyText(site.url)}
                   className="ml-3 shrink-0 p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded transition-colors"
                   title="Copier l'URL"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 0116 0v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                   </svg>
                 </button>
               </div>
-            ) : (
-              <div className="space-y-2">
-                <button
-                  onClick={handleFindWebsite}
-                  disabled={findingWebsite}
-                  className="flex items-center gap-2 px-4 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white text-sm font-medium rounded-lg transition-colors w-full justify-center"
-                >
-                  {findingWebsite ? (
-                    <>
-                      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                      </svg>
-                      Recherche en cours...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M16.65 16.65A7.5 7.5 0 1116.65 2a7.5 7.5 0 010 14.65z" />
-                      </svg>
-                      Trouver avec Brave Search
-                    </>
-                  )}
-                </button>
-                {websiteError && (
-                  <p className="text-xs text-red-500 text-center">{websiteError}</p>
-                )}
-              </div>
+            )) : (
+              <p className="text-sm text-gray-500">Google Places et Brave Search sont lancés automatiquement lors de l’enrichissement.</p>
             )}
           </Section>
 
@@ -303,36 +334,11 @@ export default function DetailPanel({ entreprise, onClose, onUpdateEntreprise })
                 {e.contact_rh.description && (
                   <p className="text-xs text-gray-400 line-clamp-2 mt-1">{e.contact_rh.description}</p>
                 )}
+                <Field label="Email Dropcontact" value={e.contact_rh_email} />
+                <Field label="Téléphone Dropcontact" value={e.contact_rh_telephone} />
+                <Field label="Mobile Dropcontact" value={e.contact_rh_telephone_mobile} />
               </div>
-            ) : (
-              <div className="space-y-2">
-                <button
-                  onClick={handleFindRH}
-                  disabled={findingRH}
-                  className="flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-300 text-white text-sm font-medium rounded-lg transition-colors w-full justify-center"
-                >
-                  {findingRH ? (
-                    <>
-                      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                      </svg>
-                      Recherche en cours...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                      Chercher un contact RH
-                    </>
-                  )}
-                </button>
-                {rhError && (
-                  <p className="text-xs text-red-500 text-center">{rhError}</p>
-                )}
-              </div>
-            )}
+            ) : <p className="text-sm text-gray-500">La recherche de contact RH est lancée automatiquement pendant l’enrichissement.</p>}
           </Section>
 
           {/* Liens externes */}

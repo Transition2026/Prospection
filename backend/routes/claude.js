@@ -298,7 +298,7 @@ Réponds en JSON : {"index": N} où N est le numéro du site officiel, ou {"inde
   }
 });
 
-// GET /api/claude/find-rh?nom=COMPANY&ville=CITY&code_postal=59000
+// GET /api/claude/find-rh?nom=COMPANY&enseigne=ALIAS&ville=CITY&code_postal=59000
 router.get('/find-rh', async (req, res) => {
   try {
     const apiKey = process.env.BRAVE_API_KEY;
@@ -306,11 +306,21 @@ router.get('/find-rh', async (req, res) => {
       return res.status(500).json({ error: 'BRAVE_API_KEY non configurée dans le .env' });
     }
 
-    const { nom, ville, code_postal } = req.query;
+    const { nom, enseigne = '', ville, code_postal, site_web = '' } = req.query;
     if (!nom) return res.status(400).json({ error: 'Paramètre nom manquant' });
 
     const lieu = [ville, code_postal].filter(Boolean).join(' ');
-    const query = `"${nom}" ${lieu} (RH OR DRH OR "Ressources Humaines" OR recrutement) site:linkedin.com/in`;
+    let marqueSite = '';
+    try {
+      marqueSite = new URL(site_web.startsWith('http') ? site_web : `https://${site_web}`).hostname.replace(/^www\./i, '').split('.')[0];
+    } catch {
+      // Le site est facultatif et ne doit jamais empêcher la recherche RH.
+    }
+    const aliases = [...new Map([nom, enseigne, marqueSite].filter(Boolean).map((value) => [normalize(value), value])).values()];
+    const entrepriseQuery = aliases.length > 1
+      ? `(${aliases.map((value) => `"${value}"`).join(' OR ')})`
+      : `"${nom}"`;
+    const query = `${entrepriseQuery} ${lieu} (RH OR DRH OR "Ressources Humaines" OR recrutement OR talent OR "human resources" OR HRBP) site:linkedin.com/in`;
 
     const { ok, status, data } = await braveSearch(query, apiKey);
     if (!ok) {
@@ -322,26 +332,32 @@ router.get('/find-rh', async (req, res) => {
       return res.json({ found: false, contact_rh: null });
     }
 
-    const nomNorm = normalize(nom);
     const villeNorm = normalize(ville);
-    const tokens = nomTokens(nomNorm);
-    const RH_REGEX = /\b(rh|drh|ressources humaines|chargee? rh|responsable rh|talent|recrutement|recruteur|people|hrbp|hr manager)\b/;
+    const companyTokens = [...new Set(aliases.flatMap((alias) => nomTokens(normalize(alias))))];
+    const RH_REGEX = /\b(rh|drh|ressources humaines|chargee? rh|responsable rh|talent|recrutement|recruteur|people|hrbp|hr manager|human resources)\b/;
+    const FORMER_EMPLOYEE_REGEX = /\b(ex[- ]|former|ancien(?:ne)?|previously|jusqu en|jusqu'a)\b/;
 
     const scored = results
       .map((item) => {
+        if (!/linkedin\.com\/in\//i.test(item.url || '')) return null;
         const titleNorm = normalize(item.title);
         const descNorm = normalize(item.description);
+        const haystack = `${titleNorm} ${descNorm}`;
         let score = 0;
-        // Nom d'entreprise présent dans titre ou description (indispensable)
-        const nomMatch = tokens.some((t) => titleNorm.includes(t) || descNorm.includes(t));
-        if (nomMatch) score += 3;
-        // Mots-clés RH dans le titre LinkedIn
-        if (RH_REGEX.test(titleNorm)) score += 2;
+        // Plusieurs tokens d'entreprise sont plus fiables qu'un mot isolé
+        // tel que « nord » ou « solutions ».
+        const companyMatches = companyTokens.filter((token) => haystack.includes(token));
+        if (companyMatches.length > 0) score += Math.min(5, companyMatches.length * 2);
+        if (RH_REGEX.test(titleNorm)) score += 4;
+        else if (RH_REGEX.test(descNorm)) score += 2;
         // Ville ou code postal
-        if (villeNorm && (titleNorm.includes(villeNorm) || descNorm.includes(villeNorm))) score += 1;
+        if (villeNorm && haystack.includes(villeNorm)) score += 1;
         if (code_postal && descNorm.includes(code_postal)) score += 1;
-        return { item, score };
+        if (FORMER_EMPLOYEE_REGEX.test(haystack)) score -= 4;
+        return { item, score, companyMatches: companyMatches.length };
       })
+      .filter(Boolean)
+      .filter((candidate) => candidate.companyMatches > 0)
       .sort((a, b) => b.score - a.score);
 
     if (scored.length === 0) {
@@ -351,7 +367,7 @@ router.get('/find-rh', async (req, res) => {
     let chosen = null;
 
     // Cas confiant : top score élevé et détaché
-    if (isConfident(scored, 5, 2)) {
+    if (isConfident(scored, 6, 2)) {
       chosen = scored[0];
     } else {
       // Cas ambigu : GPT départage parmi le top 5
@@ -371,7 +387,7 @@ Réponds en JSON : {"index": N} où N est le numéro du profil, ou {"index": nul
       const gptIdx = await pickWithGPT(candidates, prompt);
       if (gptIdx !== null) {
         chosen = candidates[gptIdx];
-      } else if (scored[0].score >= 3) {
+      } else if (scored[0].score >= 5) {
         // Fallback scoring si GPT abstient
         chosen = scored[0];
       }
@@ -410,6 +426,7 @@ Réponds en JSON : {"index": N} où N est le numéro du profil, ou {"index": nul
         poste: poste_rh,
         url_linkedin: url,
         description,
+        fiabilite: chosen.score,
       },
     });
   } catch (err) {
