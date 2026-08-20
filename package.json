@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
     "desktop:dev": "npm run build --prefix frontend && electron .",
-    "desktop:dist": "npm run build --prefix frontend && electron-builder --win nsis --x64",
+    "desktop:dist": "npm run build --prefix frontend && electron-builder --win nsis --x64 --publish never",
     "desktop:portable": "npm run build --prefix frontend && electron-builder --win portable --x64"
   },
   "keywords": [],
@@ -33,6 +33,15 @@
           "!.env",
           "!node_modules/.cache/**",
           "!*.log"
+        ]
+      },
+      {
+        "from": "backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*",
+          "!.cache/**",
+          "!**/*.log"
         ]
       }
     ],
