@@ -121,6 +121,7 @@ export async function initializeCompanyCache() {
   const db = await openDatabase();
   await migrateLegacyCache(db);
   await compactSearchPages(db);
+  await migrateProspectionStatuses(db);
   return db;
 }
 
@@ -162,13 +163,47 @@ async function compactSearchPages(db) {
   await completed;
 }
 
+// Les premières versions distinguaient « pas intéressée » et « exportée ».
+// Ces deux états doivent rester traçables, mais ne doivent plus réapparaître
+// dans les résultats : on les stabilise donc sous l'état interne `processed`.
+async function migrateProspectionStatuses(db) {
+  const transaction = db.transaction([STORES.companies, STORES.meta], 'readwrite');
+  const completed = transactionResult(transaction);
+  const meta = transaction.objectStore(STORES.meta);
+  const migration = await requestResult(meta.get('prospection-status-version'));
+  if (migration?.value === 1) {
+    await completed;
+    return;
+  }
+
+  const companies = transaction.objectStore(STORES.companies);
+  const records = await requestResult(companies.getAll());
+  for (const record of records) {
+    const data = persistentCompany(record.data);
+    if (!['not_interested', 'exported'].includes(data.prospection_status)) continue;
+    const wasExported = data.prospection_status === 'exported';
+    companies.put({
+      ...record,
+      data: {
+        ...data,
+        prospection_status: 'processed',
+        prospection_reason: data.prospection_reason || (wasExported ? 'Export XLSX' : 'Décision : pas intéressée'),
+        processed_at: data.processed_at || data.exported_at || data.prospection_updated_at || isoNow(),
+      },
+      updated_at: record.updated_at || isoNow(),
+    });
+  }
+  meta.put({ key: 'prospection-status-version', value: 1, updated_at: isoNow() });
+  await completed;
+}
+
 export function createSearchSignature(params) {
   return JSON.stringify({
     departements: [...(params.departements || [])].sort(),
     sections: [...(params.sections || [])].sort(),
-    code_postal: params.code_postal || '',
+    code_postaux: [...(params.code_postaux || (params.code_postal ? [params.code_postal] : []))].sort(),
     nom_contient: params.nom_contient || '',
-    naf_prefix: params.naf_prefix || '',
+    naf_prefixes: [...(params.naf_prefixes || (params.naf_prefix ? [params.naf_prefix] : []))].sort(),
   });
 }
 
@@ -223,6 +258,15 @@ export async function getCompanyOverrides() {
   const records = await requestResult(transaction.objectStore(STORES.companies).getAll());
   await completed;
   return new Map(records.map((record) => [record.siren, hydratedRecord(record)]));
+}
+
+export async function getCachedCompanies() {
+  const db = await initializeCompanyCache();
+  const transaction = db.transaction(STORES.companies, 'readonly');
+  const completed = transactionResult(transaction);
+  const records = await requestResult(transaction.objectStore(STORES.companies).getAll());
+  await completed;
+  return records.map(hydratedRecord).filter((company) => company.siren);
 }
 
 export async function hydrateCompanies(companies) {

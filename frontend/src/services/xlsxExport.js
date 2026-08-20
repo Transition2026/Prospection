@@ -4,6 +4,12 @@ function downloadWorkbook(workbook, filename) {
   XLSX.writeFile(workbook, filename, { compression: true });
 }
 
+function timestampForFilename() {
+  const date = new Date();
+  const pad = (value) => `${value}`.padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+}
+
 function googleCandidates(company) {
   return company.places_result?.candidats || [];
 }
@@ -109,5 +115,46 @@ export function exportInterestedXlsx(companies) {
   googleSheet['!cols'] = Object.keys(candidateRows[0] || {}).map((header) => ({ wch: Math.min(Math.max(header.length + 2, 14), 34) }));
   XLSX.utils.book_append_sheet(workbook, mainSheet, 'Interessées');
   XLSX.utils.book_append_sheet(workbook, googleSheet, 'Google Places');
-  downloadWorkbook(workbook, `prospection_interessees_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  downloadWorkbook(workbook, `prospection_interessees_${timestampForFilename()}.xlsx`);
+}
+
+export function exportCacheXlsx(companies, mode = 'all') {
+  const rows = companies.map((company) => ({
+    SIREN: company.siren || '',
+    Entreprise: company.nom_entreprise || '',
+    Statut_prospection: company.prospection_status || 'unspecified',
+    Raison_prospection: company.prospection_reason || '',
+    Traitee_le: company.processed_at || company.prospection_updated_at || '',
+    Enrichie_le: company.enriched_at || '',
+    Exportee_le: company.exported_at || '',
+    Code_NAF: company.code_naf || '',
+    Tranche_effectif: company.tranche_effectif || '',
+    Nombre_etablissements: company.nb_etablissements ?? '',
+    Siege_legal: company.adresse_legale || company.adresse || '',
+    CP_siege: company.code_postal_legal || company.code_postal || '',
+    Ville_siege: company.ville_legale || company.ville || '',
+    Etablissement_Data_gouv: company.adresse_etablissement || '',
+    CP_etablissement: company.code_postal_etablissement || '',
+    Ville_etablissement: company.ville_etablissement || '',
+    Site_web: company.site_web || '',
+    Site_web_Google: company.site_web_google || '',
+    Site_web_Brave: company.site_web_brave || '',
+    Statut_Google: company.statut_google || '',
+    Score_Google_Places: company.place_score ?? company.places_result?.score ?? '',
+    Prenom_dirigeant: company.prenom_dirigeant || '',
+    Nom_dirigeant: company.nom_dirigeant || '',
+    Qualite_dirigeant: company.qualite_dirigeant || '',
+    Contact_RH: company.contact_rh?.nom || '',
+    Poste_RH: company.contact_rh?.poste || '',
+    Email_dirigeant_Dropcontact: company.leader_email || '',
+    Email_RH_Dropcontact: company.contact_rh_email || '',
+    Email_principal: company.email || '',
+    Source_email: company.contact_email_source || '',
+    Telephone: company.telephone || company.leader_telephone || company.contact_rh_telephone || '',
+  }));
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.json_to_sheet(rows);
+  sheet['!cols'] = Object.keys(rows[0] || {}).map((header) => ({ wch: Math.min(Math.max(header.length + 2, 14), 34) }));
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Cache');
+  downloadWorkbook(workbook, `cache_prospection_${mode}_${timestampForFilename()}.xlsx`);
 }

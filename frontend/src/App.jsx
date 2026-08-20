@@ -10,10 +10,10 @@ import {
 } from './services/api';
 import {
   cacheSearchPage, clearCompanyCache, createSearchSignature, exportCompanyCache,
-  getCacheStats, getCachedSearch, hydrateCompanies, importCompanyCache,
+  getCacheStats, getCachedCompanies, getCachedSearch, hydrateCompanies, importCompanyCache,
   initializeCompanyCache, updateCachedCompany,
 } from './services/companyCache';
-import { exportInterestedXlsx } from './services/xlsxExport';
+import { exportCacheXlsx, exportInterestedXlsx } from './services/xlsxExport';
 
 const ZERO_EMPLOYEE_CODES = new Set(['NN', '00']);
 const MICRO_CODES = new Set(['01', '02', '03']);
@@ -155,9 +155,10 @@ function isInSearchedArea(company, params, filterLegalHeadquarters) {
   if (!params) return true;
   const establishmentPostalCode = company.code_postal_etablissement || '';
   const headquartersPostalCode = company.code_postal_legal || company.code_postal || '';
-  if (params.code_postal) {
-    if (establishmentPostalCode !== params.code_postal) return false;
-    return !filterLegalHeadquarters || headquartersPostalCode === params.code_postal;
+  const postalCodes = [...new Set([...(params.code_postaux || []), params.code_postal].filter(Boolean))];
+  if (postalCodes.length) {
+    if (!postalCodes.includes(establishmentPostalCode)) return false;
+    return !filterLegalHeadquarters || postalCodes.includes(headquartersPostalCode);
   }
   const departements = params.departements || [];
   if (!departements.length) return true;
@@ -219,6 +220,7 @@ export default function App() {
   const [autoDeciding, setAutoDeciding] = useState(false);
   const [autoDecisionProgress, setAutoDecisionProgress] = useState(null);
   const [cacheStats, setCacheStats] = useState({ companies: 0, pages: 0 });
+  const [cacheMenuOpen, setCacheMenuOpen] = useState(false);
   const cancelSearchRef = useRef(false);
   const importInputRef = useRef(null);
 
@@ -248,7 +250,10 @@ export default function App() {
     if (!categoryFilter[company.categorie || categoryFromSize(company.tranche_effectif)]) return false;
     if (excludeGroups && company.nb_etablissements > 35) return false;
     if (searchParams?.nom_contient && !normalizedText(company.nom_entreprise).includes(normalizedText(searchParams.nom_contient))) return false;
-    if (searchParams?.naf_prefix && !normalizedNaf(company.code_naf).startsWith(normalizedNaf(searchParams.naf_prefix))) return false;
+    const nafPrefixes = [...new Set([...(searchParams?.naf_prefixes || []), searchParams?.naf_prefix].filter(Boolean))]
+      .map(normalizedNaf)
+      .filter(Boolean);
+    if (nafPrefixes.length && !nafPrefixes.some((prefix) => normalizedNaf(company.code_naf).startsWith(prefix))) return false;
     if (!isInSearchedArea(company, searchParams, filterLegalHeadquarters)) return false;
     return true;
   }, [activeSearchParams, categoryFilter, excludeGroups, filterLegalHeadquarters]);
@@ -594,7 +599,9 @@ export default function App() {
       });
     } finally {
       setEnriching(false);
-      setSelected(new Set());
+      // On conserve la sélection après enrichissement : l'export des fiches
+      // désormais enrichies reste immédiatement disponible.
+      setSelected(new Set(targets.map((company) => company.siren)));
     }
   }, [enrichOne, interested, selected]);
 
@@ -615,6 +622,26 @@ export default function App() {
     link.download = `cache_prospection_${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
     URL.revokeObjectURL(url);
+  }, []);
+
+  const handleCacheXlsxExport = useCallback(async (mode) => {
+    try {
+      const cached = await getCachedCompanies();
+      const filtered = cached.filter((company) => {
+        if (mode === 'enriched') return Boolean(company.enriched_at);
+        if (mode === 'enriched_with_email') {
+          return Boolean(company.enriched_at && (company.email || company.leader_email || company.contact_rh_email));
+        }
+        return true;
+      });
+      if (!filtered.length) {
+        window.alert('Aucune fiche ne correspond à cette extraction du cache.');
+        return;
+      }
+      exportCacheXlsx(filtered, mode);
+    } catch (err) {
+      setError(`Extraction du cache : ${err.message}`);
+    }
   }, []);
 
   const handleCacheImport = useCallback(async (event) => {
@@ -647,7 +674,7 @@ export default function App() {
     if (!exportableInterested.length) return;
     exportInterestedXlsx(exportableInterested);
     await Promise.all(exportableInterested.map((company) => patchCompany(company.siren, {
-      prospection_status: 'exported',
+      prospection_status: 'processed',
       prospection_reason: 'Export XLSX',
       prospection_updated_at: new Date().toISOString(),
       exported_at: new Date().toISOString(),
@@ -666,10 +693,22 @@ export default function App() {
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-3 text-xs">
             <span className="text-gray-400">Cache : {cacheStats.companies} fiches · {cacheStats.pages} pages</span>
-            <button type="button" onClick={handleCacheExport} className="text-blue-600 hover:underline">Exporter le cache</button>
-            <button type="button" onClick={() => importInputRef.current?.click()} className="text-blue-600 hover:underline">Importer le cache</button>
+            <button type="button" onClick={() => setCacheMenuOpen((open) => !open)} className="text-blue-600 hover:underline">Cache</button>
             <input ref={importInputRef} type="file" accept="application/json" className="hidden" onChange={handleCacheImport} />
           </div>
+          {cacheMenuOpen && <div className="basis-full ml-auto max-w-md rounded-xl border border-blue-100 bg-blue-50 p-3 text-xs text-blue-950">
+            <p className="font-semibold">Extraire le cache en XLSX</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button type="button" onClick={() => handleCacheXlsxExport('all')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Tout</button>
+              <button type="button" onClick={() => handleCacheXlsxExport('enriched')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Enrichies</button>
+              <button type="button" onClick={() => handleCacheXlsxExport('enriched_with_email')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Enrichies avec email</button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-3 border-t border-blue-100 pt-3">
+              <button type="button" onClick={handleCacheExport} className="text-blue-700 hover:underline">Sauvegarde JSON</button>
+              <button type="button" onClick={() => importInputRef.current?.click()} className="text-blue-700 hover:underline">Importer JSON</button>
+              <button type="button" onClick={handleClearCache} className="text-red-700 hover:underline">Vider le cache local</button>
+            </div>
+          </div>}
         </div>
       </header>
 
@@ -688,7 +727,7 @@ export default function App() {
 
         <nav className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
           {[['discover', `À traiter (${visible.length})`], ['interested', `Intéressées (${interested.length})`], ['not_interested', `Pas intéressées (${notInterested.length})`]].map(([key, label]) => (
-            <button key={key} type="button" onClick={() => { setView(key); if (key !== 'interested') setSelected(new Set()); }} className={`px-4 py-2 rounded-full text-sm font-medium ${view === key ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600'}`}>{label}</button>
+            <button key={key} type="button" onClick={() => { setView(key); setSelected(key === 'interested' ? new Set(interested.map((company) => company.siren)) : new Set()); }} className={`px-4 py-2 rounded-full text-sm font-medium ${view === key ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600'}`}>{label}</button>
           ))}
         </nav>
 

@@ -14,6 +14,13 @@ const CATEGORIES = [
   ['micro', 'Micro', '1 à 9 salariés'], ['pme', 'PME', '10 à 249 salariés'], ['grande', 'Grande', '250+ salariés'],
 ];
 
+function commaSeparatedValues(value, normalizer) {
+  return [...new Set(value
+    .split(',')
+    .map((item) => normalizer(item.trim()))
+    .filter(Boolean))];
+}
+
 export default function SearchForm({ onSearch, loading, categoryFilter, onCategoryChange, exclureGroupes, onExclureGroupesChange, filterLegalHeadquarters, onFilterLegalHeadquartersChange }) {
   const [geoMode, setGeoMode] = useState('departement');
   const [departements, setDepartements] = useState(['59']);
@@ -26,14 +33,20 @@ export default function SearchForm({ onSearch, loading, categoryFilter, onCatego
 
   function submit(event) {
     event.preventDefault();
+    const codePostaux = commaSeparatedValues(codePostal, (value) => value.replace(/\D/g, '').slice(0, 5));
+    const nafPrefixes = commaSeparatedValues(nafPrefix, (value) => value.replace(/[^0-9a-z.]/gi, '').slice(0, 5));
+    if (geoMode === 'code_postal' && (!codePostaux.length || codePostaux.some((value) => value.length !== 5))) {
+      window.alert('Saisis un ou plusieurs codes postaux à 5 chiffres, séparés par des virgules.');
+      return;
+    }
     const params = {
       sections,
       nom_contient: nomContient.trim(),
-      naf_prefix: nafPrefix.trim(),
+      naf_prefixes: nafPrefixes,
       limit: limit === 'all' ? 'all' : Math.min(Math.max(Number(limit) || 25, 1), 2000),
       per_page: 25,
     };
-    if (geoMode === 'code_postal') params.code_postal = codePostal.trim();
+    if (geoMode === 'code_postal') params.code_postaux = codePostaux;
     else params.departements = departements.length ? departements : ['59'];
     onSearch(params);
   }
@@ -46,7 +59,7 @@ export default function SearchForm({ onSearch, loading, categoryFilter, onCatego
           <label className="flex gap-2 items-center"><input type="radio" checked={geoMode === 'departement'} onChange={() => setGeoMode('departement')} className="accent-blue-600" /> Département</label>
           <label className="flex gap-2 items-center"><input type="radio" checked={geoMode === 'code_postal'} onChange={() => setGeoMode('code_postal')} className="accent-blue-600" /> Ville / code postal</label>
         </div>
-        {geoMode === 'departement' ? <div className="mt-3 flex flex-wrap gap-2">{DEPARTEMENTS.map((dept) => <button key={dept.value} type="button" onClick={() => toggle(dept.value, setDepartements)} className={`px-3 py-1.5 rounded-full text-sm border ${departements.includes(dept.value) ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-600'}`}>{dept.label}</button>)}</div> : <input value={codePostal} onChange={(event) => setCodePostal(event.target.value.replace(/\D/g, '').slice(0, 5))} required placeholder="Ex. 59000" inputMode="numeric" className="mt-3 w-full max-w-xs rounded-lg border border-gray-300 px-3 py-2 text-sm" />}
+        {geoMode === 'departement' ? <div className="mt-3 flex flex-wrap gap-2">{DEPARTEMENTS.map((dept) => <button key={dept.value} type="button" onClick={() => toggle(dept.value, setDepartements)} className={`px-3 py-1.5 rounded-full text-sm border ${departements.includes(dept.value) ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-600'}`}>{dept.label}</button>)}</div> : <input value={codePostal} onChange={(event) => setCodePostal(event.target.value)} required placeholder="Ex. 59000, 59100" inputMode="text" className="mt-3 w-full max-w-md rounded-lg border border-gray-300 px-3 py-2 text-sm" />}
       </div>
 
       <div>
@@ -60,7 +73,7 @@ export default function SearchForm({ onSearch, loading, categoryFilter, onCatego
             <input value={nomContient} onChange={(event) => setNomContient(event.target.value)} placeholder="Ex. transition" className="mt-1.5 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
           </label>
           <label className="text-sm text-gray-600">Code NAF commence par
-            <input value={nafPrefix} onChange={(event) => setNafPrefix(event.target.value.replace(/[^0-9a-z.]/gi, '').slice(0, 5))} placeholder="Ex. 62 ou 62.01" className="mt-1.5 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+            <input value={nafPrefix} onChange={(event) => setNafPrefix(event.target.value)} placeholder="Ex. 62, 62.01" className="mt-1.5 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
           </label>
         </div>
       </div>
