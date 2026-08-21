@@ -21,9 +21,11 @@ export async function checkStatus() {
 }
 
 export async function searchEntreprises(params, page = 1, existingSirens = new Set()) {
-  const { departements, sections, per_page, limit, ...rest } = params;
+  const { departements, sections, code_postaux, per_page, limit, ...rest } = params;
+  delete rest.naf_prefixes;
   const depts = departements?.length ? departements : [null];
   const sects = sections?.length ? sections : [null];
+  const postcodes = code_postaux?.length ? code_postaux : [null];
   const results = [];
   let hasMore = false;
   let totalPages = 0;
@@ -34,16 +36,19 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
   // On les sérialise pour rester sous la limite publique de Data.gouv.
   for (const dept of depts) {
     for (const sect of sects) {
-      if (!firstRequest) await sleep(170);
-      firstRequest = false;
-      const query = new URLSearchParams({ ...rest, per_page: per_page || 25, page });
-      if (dept) query.set('departement', dept);
-      if (sect) query.set('section', sect);
-      const data = await lireJson(await fetch(`${BASE_URL}/api/entreprises/search?${query}`), 'Erreur Data.gouv');
-      results.push(...(data.entreprises || []));
-      hasMore = hasMore || Boolean(data.has_more);
-      totalPages = Math.max(totalPages, Number(data.total_pages) || 0);
-      totalResults += Number(data.total_results) || 0;
+      for (const postcode of postcodes) {
+        if (!firstRequest) await sleep(170);
+        firstRequest = false;
+        const query = new URLSearchParams({ ...rest, per_page: per_page || 25, page });
+        if (dept) query.set('departement', dept);
+        if (sect) query.set('section', sect);
+        if (postcode) query.set('code_postal', postcode);
+        const data = await lireJson(await fetch(`${BASE_URL}/api/entreprises/search?${query}`), 'Erreur Data.gouv');
+        results.push(...(data.entreprises || []));
+        hasMore = hasMore || Boolean(data.has_more);
+        totalPages = Math.max(totalPages, Number(data.total_pages) || 0);
+        totalResults += Number(data.total_results) || 0;
+      }
     }
   }
   const seen = new Set(existingSirens);
