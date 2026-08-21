@@ -21,7 +21,7 @@ function commaSeparatedValues(value, normalizer) {
     .filter(Boolean))];
 }
 
-export default function SearchForm({ onSearch, loading, categoryFilter, onCategoryChange, exclureGroupes, onExclureGroupesChange, filterLegalHeadquarters, onFilterLegalHeadquartersChange }) {
+export default function SearchForm({ onSearch, onCancel, loading, categoryFilter, onCategoryChange, exclureGroupes, onExclureGroupesChange, filterLegalHeadquarters, onFilterLegalHeadquartersChange }) {
   const [geoMode, setGeoMode] = useState('departement');
   const [departements, setDepartements] = useState(['59']);
   const [codePostal, setCodePostal] = useState('');
@@ -43,8 +43,13 @@ export default function SearchForm({ onSearch, loading, categoryFilter, onCatego
       sections,
       nom_contient: nomContient.trim(),
       naf_prefixes: nafPrefixes,
-      limit: limit === 'all' ? 'all' : Math.min(Math.max(Number(limit) || 25, 1), 2000),
+      limit: limit === 'all' ? 'all' : Math.min(Math.max(Number(limit) || 25, 1), 10000),
       per_page: 25,
+      tranche_effectif_salarie: [
+        ...(categoryFilter.micro ? ['01', '02', '03'] : []),
+        ...(categoryFilter.pme ? ['11', '12', '21', '22', '31'] : []),
+        ...(categoryFilter.grande ? ['32', '41', '42', '51', '52', '53'] : []),
+      ],
     };
     if (geoMode === 'code_postal') params.code_postaux = codePostaux;
     else params.departements = departements.length ? departements : ['59'];
@@ -82,7 +87,8 @@ export default function SearchForm({ onSearch, loading, categoryFilter, onCatego
         <div><h2 className="font-semibold text-gray-800">Taille</h2><div className="mt-3 flex flex-wrap gap-2">{CATEGORIES.map(([key, label, subtitle]) => <button key={key} type="button" onClick={() => onCategoryChange((previous) => ({ ...previous, [key]: !previous[key] }))} className={`px-3 py-1.5 rounded-full text-sm border ${categoryFilter[key] ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-600'}`}>{label} <span className="opacity-75 text-xs">{subtitle}</span></button>)}</div></div>
         <label className="flex gap-2 items-center text-sm text-gray-600"><input type="checkbox" checked={exclureGroupes} onChange={(event) => onExclureGroupesChange(event.target.checked)} className="accent-blue-600" /> Exclure les groupes (&gt;35 établissements)</label>
         <button type="button" onClick={() => onFilterLegalHeadquartersChange(!filterLegalHeadquarters)} className={`px-3 py-1.5 rounded-full text-sm border ${filterLegalHeadquarters ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-600'}`} title="Applique aussi la zone de recherche au siège légal">Siège légal = établissement : {filterLegalHeadquarters ? 'activé' : 'désactivé'}</button>
-        <label className="text-sm text-gray-600">Résultats <select value={limit} onChange={(event) => setLimit(event.target.value)} className="ml-2 rounded-lg border border-gray-300 px-2 py-1.5"><option value="25">25</option><option value="100">100</option><option value="500">500</option><option value="2000">2 000</option><option value="all">Tous les résultats</option></select></label>
+        <label className="text-sm text-gray-600">Objectif <select value={limit} onChange={(event) => setLimit(event.target.value)} className="ml-2 rounded-lg border border-gray-300 px-2 py-1.5"><option value="25">25</option><option value="100">100</option><option value="500">500</option><option value="2000">2 000</option><option value="10000">10 000</option><option value="all">Jusqu'à épuisement (max. 10 000)</option></select></label>
+        {loading && <button type="button" onClick={onCancel} className="rounded-xl border border-red-300 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-50">Arrêter</button>}
         <button type="submit" disabled={loading} className="ml-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-200 text-white font-semibold">{loading ? 'Recherche en cours…' : 'Rechercher'}</button>
       </div>
     </form>

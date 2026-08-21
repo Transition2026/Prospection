@@ -98,7 +98,7 @@ async function remonterDirigeant(siren, visited = new Set(), depth = 0) {
 // GET /api/entreprises/search
 router.get('/search', async (req, res) => {
   try {
-    const { departement, code_postal, section, q, nom_contient, per_page = 25, page = 1 } = req.query;
+    const { departement, code_postal, section, q, nom_contient, tranche_effectif_salarie, per_page = 25, page = 1 } = req.query;
 
     const url = new URL(`${GOUV_BASE}/search`);
 
@@ -109,6 +109,14 @@ router.get('/search', async (req, res) => {
     if (code_postal) url.searchParams.set('code_postal', code_postal);
     if (section) url.searchParams.set('section_activite_principale', section);
     if (departement) url.searchParams.set('departement', departement);
+    if (tranche_effectif_salarie) url.searchParams.set('tranche_effectif_salarie', tranche_effectif_salarie);
+    // Réduit le volume transféré sans retirer les champs nécessaires au tri,
+    // à la décision locale ou à la vérification d'établissement.
+    url.searchParams.set('etat_administratif', 'A');
+    url.searchParams.set('minimal', 'true');
+    url.searchParams.set('include', 'siege,dirigeants,matching_etablissements');
+    url.searchParams.set('limite_matching_etablissements', '1');
+    url.searchParams.set('sort_by_size', 'true');
     url.searchParams.set('per_page', Math.min(Number(per_page), 25));
 
     url.searchParams.set('page', Number(page));

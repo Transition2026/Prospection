@@ -20,7 +20,7 @@ export async function checkStatus() {
   return lireJson(await fetch(`${BASE_URL}/api/status`), 'Erreur de statut API');
 }
 
-export async function searchEntreprises(params, page = 1, existingSirens = new Set()) {
+export async function searchEntreprises(params, page = 1, existingSirens = new Set(), signal) {
   const { departements, sections, code_postaux, per_page, limit, ...rest } = params;
   delete rest.naf_prefixes;
   const depts = departements?.length ? departements : [null];
@@ -43,7 +43,7 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
         if (dept) query.set('departement', dept);
         if (sect) query.set('section', sect);
         if (postcode) query.set('code_postal', postcode);
-        const data = await lireJson(await fetch(`${BASE_URL}/api/entreprises/search?${query}`), 'Erreur Data.gouv');
+        const data = await lireJson(await fetch(`${BASE_URL}/api/entreprises/search?${query}`, { signal }), 'Erreur Data.gouv');
         results.push(...(data.entreprises || []));
         hasMore = hasMore || Boolean(data.has_more);
         totalPages = Math.max(totalPages, Number(data.total_pages) || 0);
@@ -64,40 +64,46 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
   };
 }
 
-export async function getDirigeantReel(siren) {
-  return lireJson(await fetch(`${BASE_URL}/api/entreprises/dirigeant-reel?siren=${encodeURIComponent(siren)}`), 'Erreur remontée dirigeant');
+export async function getDirigeantReel(siren, signal) {
+  return lireJson(await fetch(`${BASE_URL}/api/entreprises/dirigeant-reel?siren=${encodeURIComponent(siren)}`, { signal }), 'Erreur remontée dirigeant');
 }
 
-export async function resolveGooglePlace({ nom, enseigne, adresse, code_postal, ville, latitude, longitude }) {
+export async function resolveGooglePlace({ nom, enseigne, adresse, code_postal, ville, latitude, longitude }, signal) {
   return lireJson(await fetch(`${BASE_URL}/api/places/resolve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ nom, enseigne, adresse, code_postal, ville, latitude, longitude }),
+    signal,
   }), 'Erreur Google Places');
 }
 
-export async function findWebsiteWithClaude({ nom, ville, code_postal, siren }) {
+export async function findWebsiteWithClaude({ nom, ville, code_postal, siren }, signal) {
   const params = new URLSearchParams({ nom });
   if (ville) params.set('ville', ville);
   if (code_postal) params.set('code_postal', code_postal);
   if (siren) params.set('siren', siren);
-  return lireJson(await fetch(`${BASE_URL}/api/claude/find-website?${params}`), 'Erreur Brave Search');
+  return lireJson(await fetch(`${BASE_URL}/api/claude/find-website?${params}`, { signal }), 'Erreur Brave Search');
 }
 
-export async function findRHContact({ nom, enseigne, ville, code_postal, site_web }) {
+export async function findRHContact({ nom, enseigne, ville, code_postal, site_web }, signal) {
   const params = new URLSearchParams({ nom });
   if (enseigne) params.set('enseigne', enseigne);
   if (ville) params.set('ville', ville);
   if (code_postal) params.set('code_postal', code_postal);
   if (site_web) params.set('site_web', site_web);
-  return lireJson(await fetch(`${BASE_URL}/api/claude/find-rh?${params}`), 'Erreur Brave Search');
+  return lireJson(await fetch(`${BASE_URL}/api/claude/find-rh?${params}`, { signal }), 'Erreur Brave Search');
 }
 
-export async function enrichDropcontact({ prenom, nom, entreprise, site_web, siren, siret, pays, poste, linkedin, telephone }) {
+export async function enrichDropcontact({ prenom, nom, entreprise, site_web, siren, siret, pays, poste, linkedin, telephone }, signal) {
   return lireJson(await fetch(`${BASE_URL}/api/dropcontact/enrich`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prenom, nom, entreprise, site_web, siren, siret, pays, poste, linkedin, telephone }),
+    signal,
   }), 'Erreur Dropcontact');
+}
+
+export async function getApiUsage() {
+  return lireJson(await fetch(`${BASE_URL}/api/usage`), 'Erreur de lecture des crédits API');
 }
 
 export async function classifyEntreprises(entreprises) {
