@@ -3,6 +3,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { spawn } = require('child_process');
+const { autoUpdater } = require('electron-updater');
 
 app.setName('Prospection B2B');
 
@@ -13,6 +14,7 @@ const CONFIG_KEYS = [...REQUIRED_KEYS, 'GPT_API_KEY', 'DATABASE_URL', 'DIRECT_UR
 let backendProcess = null;
 let mainWindow = null;
 let isQuitting = false;
+let updatePromptShown = false;
 
 function backendDirectory() {
   return app.isPackaged
@@ -136,6 +138,33 @@ ipcMain.handle('secure-config:save', async (_event, values) => {
   return secureConfigStatus();
 });
 
+function configureAutoUpdates() {
+  if (!app.isPackaged || process.platform !== 'win32') return;
+
+  autoUpdater.on('error', (error) => {
+    // Une panne de vérification ne doit jamais empêcher l'application de démarrer.
+    console.warn(`Vérification de mise à jour impossible : ${error.message}`);
+  });
+
+  autoUpdater.on('update-downloaded', async (update) => {
+    if (updatePromptShown || !mainWindow) return;
+    updatePromptShown = true;
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Mise à jour prête',
+      message: `La version ${update.version} de Prospection B2B est prête.`,
+      detail: 'Redémarre maintenant pour l’installer. Tes réglages et données locales sont conservés.',
+      buttons: ['Redémarrer et installer', 'Plus tard'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) autoUpdater.quitAndInstall(false, true);
+  });
+
+  // Laisse l'interface et le backend local démarrer avant toute requête réseau.
+  setTimeout(() => autoUpdater.checkForUpdates(), 5_000);
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -167,6 +196,7 @@ async function createWindow() {
   }
   await mainWindow.loadURL(BACKEND_URL);
   mainWindow.show();
+  configureAutoUpdates();
 }
 
 if (!app.requestSingleInstanceLock()) {

@@ -808,7 +808,7 @@ export default function App() {
         {searchProgress && (
           <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex flex-wrap items-center gap-3">
             <span>{searchProgress.loaded} entreprises mémorisées{searchProgress.total ? ` sur ${searchProgress.total}` : ''} · page {searchProgress.page} · objectif max. {DATA_GOUV_SOFT_CAP.toLocaleString('fr-FR')}</span>
-            {searching && <button type="button" onClick={() => { cancelSearchRef.current = true; }} className="ml-auto text-red-600 underline">Arrêter la recherche</button>}
+            {searching && <button type="button" onClick={stopSearch} className="ml-auto text-red-600 underline">Arrêter la recherche</button>}
           </div>
         )}
 

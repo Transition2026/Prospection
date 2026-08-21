@@ -1,12 +1,13 @@
 {
   "name": "appli-searchpdg",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "",
   "main": "desktop/main.js",
   "scripts": {
     "dev": "concurrently --names \"BACK,FRONT\" --prefix-colors \"blue,green\" \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
     "desktop:dev": "npm run build --prefix frontend && electron .",
     "desktop:dist": "npm run build --prefix frontend && electron-builder --win nsis --x64 --publish never",
+    "desktop:publish": "npm run build --prefix frontend && electron-builder --win nsis --x64 --publish always",
     "desktop:portable": "npm run build --prefix frontend && electron-builder --win portable --x64"
   },
   "keywords": [],
@@ -52,11 +53,20 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Transition2026",
+      "repo": "Prospection",
+      "releaseType": "release"
     }
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }
