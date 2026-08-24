@@ -15,6 +15,7 @@ import {
   initializeCompanyCache, updateCachedCompany,
 } from './services/companyCache';
 import { exportCacheXlsx, exportInterestedXlsx } from './services/xlsxExport';
+import { readCacheImportFile } from './services/xlsxCacheImport';
 
 const ZERO_EMPLOYEE_CODES = new Set(['NN', '00']);
 const MICRO_CODES = new Set(['01', '02', '03']);
@@ -838,7 +839,8 @@ export default function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const merged = await importCompanyCache(JSON.parse(await file.text()));
+      const { format, payload } = await readCacheImportFile(file);
+      const merged = await importCompanyCache(payload);
       // Réhydrate immédiatement la liste déjà affichée : sans cela les décisions
       // importées ne sont appliquées qu'à la recherche suivante et des fiches
       // déjà traitées restent à tort dans « À traiter ».
@@ -850,7 +852,7 @@ export default function App() {
       });
       await refreshCacheStats();
       setError(null);
-      window.alert(`${merged} élément(s) de cache fusionné(s).`);
+      window.alert(`${merged} élément(s) de cache fusionné(s) depuis le fichier ${format}.`);
     } catch (err) {
       setError(`Import du cache : ${err.message}`);
     } finally {
@@ -885,7 +887,7 @@ export default function App() {
           <div className="ml-auto flex flex-wrap items-center gap-3 text-xs">
             <span className="text-gray-400">Cache : {cacheStats.companies} fiches · {cacheStats.pages} pages</span>
             <button type="button" onClick={() => setCacheMenuOpen((open) => !open)} className="text-blue-600 hover:underline">Cache</button>
-            <input ref={importInputRef} type="file" accept="application/json" className="hidden" onChange={handleCacheImport} />
+            <input ref={importInputRef} type="file" accept=".json,application/json,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,application/vnd.ms-excel" className="hidden" onChange={handleCacheImport} />
           </div>
           {cacheMenuOpen && <div className="basis-full ml-auto max-w-md rounded-xl border border-blue-100 bg-blue-50 p-3 text-xs text-blue-950">
             <p className="font-semibold">Extraire le cache en XLSX</p>
@@ -900,7 +902,7 @@ export default function App() {
             </div>
             <div className="mt-3 flex flex-wrap gap-3 border-t border-blue-100 pt-3">
               <button type="button" onClick={handleCacheExport} className="text-blue-700 hover:underline">Sauvegarde JSON</button>
-              <button type="button" onClick={() => importInputRef.current?.click()} className="text-blue-700 hover:underline">Importer JSON</button>
+              <button type="button" onClick={() => importInputRef.current?.click()} className="text-blue-700 hover:underline">Importer JSON / XLSX</button>
               <button type="button" onClick={handleClearCache} className="text-red-700 hover:underline">Vider le cache local</button>
             </div>
           </div>}
