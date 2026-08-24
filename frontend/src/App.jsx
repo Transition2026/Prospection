@@ -23,6 +23,7 @@ const ENRICHMENT_CONCURRENCY = 4;
 const LEADER_RESOLUTION_CONCURRENCY = 4;
 const LEADER_RESOLVER_VERSION = 2;
 const PLACES_RESOLVER_VERSION = 4;
+const DATA_GOUV_SOFT_CAP = 100000;
 
 function categoryFromSize(value) {
   if (MICRO_CODES.has(value)) return 'micro';
@@ -345,7 +346,9 @@ export default function App() {
     setSelected(new Set());
     setActiveSearchParams(params);
     const signature = createSearchSignature(params);
-    const requestedLimit = params.limit === 'all' ? Infinity : Number(params.limit || 25);
+    const requestedLimit = params.limit === 'all'
+      ? DATA_GOUV_SOFT_CAP
+      : Math.min(Number(params.limit || 25), DATA_GOUV_SOFT_CAP);
     try {
       const cached = await getCachedSearch(signature);
       let all = dedupe((await hydrateCompanies(cached.companies)).map(normalizeCompany));
@@ -720,7 +723,7 @@ export default function App() {
 
         {searchProgress && (
           <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex flex-wrap items-center gap-3">
-            <span>{searchProgress.loaded} entreprises mémorisées{searchProgress.total ? ` sur ${searchProgress.total}` : ''} · page {searchProgress.page}</span>
+            <span>{searchProgress.loaded} entreprises mémorisées{searchProgress.total ? ` sur ${searchProgress.total}` : ''} · page {searchProgress.page} · objectif max. {DATA_GOUV_SOFT_CAP.toLocaleString('fr-FR')}</span>
             {searching && <button type="button" onClick={() => { cancelSearchRef.current = true; }} className="ml-auto text-red-600 underline">Arrêter la recherche</button>}
           </div>
         )}
