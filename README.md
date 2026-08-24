@@ -158,6 +158,21 @@ npm run desktop:dist
 
 L'installeur est créé dans `release\Prospection B2B-Setup-<version>.exe`.
 
+## Publier une mise à jour pour les collègues
+
+Les collègues installent l’application une seule fois. À partir de la version qui inclut ce système, elle vérifie les mises à jour au démarrage. Lorsqu’une version est prête, elle la télécharge puis propose **« Redémarrer et installer »**. Les clés API et les données locales sont conservées.
+
+Pour publier une version, mets à jour le champ `version` de `package.json`, fusionne cette modification sur `main`, puis crée et pousse le tag correspondant :
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+Le workflow GitHub **Publish Windows release** construit alors l’installateur Windows, le publie dans les Releases GitHub avec le fichier de mise à jour, et les applications déjà installées récupèrent la nouvelle version automatiquement. Le tag doit toujours correspondre exactement à la version de `package.json` (par exemple `v1.0.1` pour `"version": "1.0.1"`).
+
+Pour la toute première diffusion de cette version, partage simplement l’installateur de la Release GitHub : les mises à jour suivantes seront intégrées à l’application.
+
 Pour créer un **seul fichier portable** à lancer par double-clic, utilise à la place :
 
 ```bat

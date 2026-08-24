@@ -163,15 +163,15 @@ async function compactSearchPages(db) {
   await completed;
 }
 
-// Les premières versions distinguaient « pas intéressée » et « exportée ».
-// Ces deux états doivent rester traçables, mais ne doivent plus réapparaître
-// dans les résultats : on les stabilise donc sous l'état interne `processed`.
+// La boîte « Pas intéressées » doit rester consultable. Les anciennes versions
+// avaient aplati ce statut sous `processed` : la migration le restaure à partir
+// de la raison mémorisée, sans toucher aux vrais exports XLSX.
 async function migrateProspectionStatuses(db) {
   const transaction = db.transaction([STORES.companies, STORES.meta], 'readwrite');
   const completed = transactionResult(transaction);
   const meta = transaction.objectStore(STORES.meta);
   const migration = await requestResult(meta.get('prospection-status-version'));
-  if (migration?.value === 1) {
+  if (migration?.value === 2) {
     await completed;
     return;
   }
@@ -180,20 +180,22 @@ async function migrateProspectionStatuses(db) {
   const records = await requestResult(companies.getAll());
   for (const record of records) {
     const data = persistentCompany(record.data);
-    if (!['not_interested', 'exported'].includes(data.prospection_status)) continue;
+    const historicalNegative = data.prospection_status === 'processed'
+      && /pas intéressée|aucun dirigeant personne physique/i.test(data.prospection_reason || '');
+    if (!['exported'].includes(data.prospection_status) && !historicalNegative) continue;
     const wasExported = data.prospection_status === 'exported';
     companies.put({
       ...record,
       data: {
         ...data,
-        prospection_status: 'processed',
+        prospection_status: historicalNegative ? 'not_interested' : 'processed',
         prospection_reason: data.prospection_reason || (wasExported ? 'Export XLSX' : 'Décision : pas intéressée'),
         processed_at: data.processed_at || data.exported_at || data.prospection_updated_at || isoNow(),
       },
       updated_at: record.updated_at || isoNow(),
     });
   }
-  meta.put({ key: 'prospection-status-version', value: 1, updated_at: isoNow() });
+  meta.put({ key: 'prospection-status-version', value: 2, updated_at: isoNow() });
   await completed;
 }
 
@@ -204,6 +206,7 @@ export function createSearchSignature(params) {
     code_postaux: [...(params.code_postaux || (params.code_postal ? [params.code_postal] : []))].sort(),
     nom_contient: params.nom_contient || '',
     naf_prefixes: [...(params.naf_prefixes || (params.naf_prefix ? [params.naf_prefix] : []))].sort(),
+    tranche_effectif_salarie: [...(params.tranche_effectif_salarie || [])].sort(),
   });
 }
 
