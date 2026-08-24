@@ -9,9 +9,17 @@ export class RateLimitError extends Error {
   }
 }
 
+export class TransientApiError extends Error {
+  constructor(message) {
+    super(message || 'Service temporairement indisponible');
+    this.isRetryable = true;
+  }
+}
+
 async function lireJson(res, erreurParDefaut) {
   const data = await res.json();
   if (res.status === 429) throw new RateLimitError(data.error, data.retry_after);
+  if (res.status >= 500) throw new TransientApiError(data.error || erreurParDefaut);
   if (!res.ok) throw new Error(data.error || erreurParDefaut);
   return data;
 }
