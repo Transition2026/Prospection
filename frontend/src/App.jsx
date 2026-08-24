@@ -5,7 +5,8 @@ import DetailPanel from './components/DetailPanel';
 import CompanyCards from './components/CompanyCards';
 import DesktopSettings from './components/DesktopSettings';
 import {
-  checkStatus, enrichDropcontact, findRHContact, findWebsiteWithClaude, getApiUsage,
+  checkStatus, enrichDropcontact, findRHContact, findWebsiteWithClaude, getApiUsage, RateLimitError,
+  TransientApiError,
   getDirigeantReel, resolveGooglePlace, searchEntreprises, sleep,
 } from './services/api';
 import {
@@ -24,6 +25,40 @@ const LEADER_RESOLUTION_CONCURRENCY = 4;
 const LEADER_RESOLVER_VERSION = 2;
 const PLACES_RESOLVER_VERSION = 4;
 const DATA_GOUV_SOFT_CAP = 10000;
+const DATA_GOUV_MAX_RETRIES = 3;
+
+function abortError() {
+  const error = new Error('Recherche annulée.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitWithAbort(delayMs, signal) {
+  if (!signal) return sleep(delayMs);
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      signal.removeEventListener('abort', cancel);
+      resolve();
+    };
+    const cancel = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+      reject(abortError());
+    };
+    const timer = setTimeout(finish, delayMs);
+    signal.addEventListener('abort', cancel, { once: true });
+  });
+}
+
+function retryDelayMs(error, attempt) {
+  if (error instanceof RateLimitError) return Math.max(1, error.retryAfter) * 1000;
+  return Math.min(2 ** attempt, 10) * 1000;
+}
+
+function isRetryableSearchError(error) {
+  return error instanceof RateLimitError || error instanceof TransientApiError || error?.isRetryable;
+}
 
 function categoryFromSize(value) {
   if (MICRO_CODES.has(value)) return 'micro';
@@ -411,19 +446,35 @@ export default function App() {
       setCompanies(all);
       let page = cached.search.next_page || 1;
       let hasMore = !cached.search.exhausted;
-      setSearchProgress({ cached: all.length, loaded: all.length, total: cached.search.total_results, page, running: hasMore });
+      let matching = all.filter((company) => passesFilters(company, 'unspecified', params)).length;
+      setSearchProgress({ cached: all.length, loaded: all.length, matching, target: requestedLimit, total: cached.search.total_results, page, running: hasMore, retry: null });
 
-      while (hasMore && !cancelSearchRef.current && all.filter((company) => passesFilters(company, 'unspecified', params)).length < requestedLimit) {
+      while (hasMore && !cancelSearchRef.current && matching < requestedLimit) {
         await sleep(170); // <= 6 pages/s, sous la limite Data.gouv de 7 req/s.
         const knownSirens = new Set(all.map((company) => company.siren));
-        const response = await searchEntreprises(params, page, knownSirens, controller.signal);
+        let response;
+        for (let attempt = 0; attempt <= DATA_GOUV_MAX_RETRIES; attempt += 1) {
+          try {
+            response = await searchEntreprises(params, page, knownSirens, controller.signal);
+            break;
+          } catch (err) {
+            if (isAbortError(err) || !isRetryableSearchError(err) || attempt === DATA_GOUV_MAX_RETRIES) throw err;
+            const delayMs = retryDelayMs(err, attempt + 1);
+            setSearchProgress((previous) => previous ? {
+              ...previous,
+              retry: { page, attempt: attempt + 1, delayMs },
+            } : previous);
+            await waitWithAbort(delayMs, controller.signal);
+          }
+        }
         const fetched = response.entreprises.map(normalizeCompany);
         await cacheSearchPage(signature, page, fetched, { hasMore: response.hasMore, totalPages: response.totalPages, totalResults: response.totalResults });
         const hydrated = await hydrateCompanies(fetched);
         all = dedupe([...all, ...hydrated.map(normalizeCompany)]);
         setCompanies(all);
         hasMore = response.hasMore;
-        setSearchProgress({ cached: cached.companies.length, loaded: all.length, total: response.totalResults || null, page, running: hasMore });
+        matching = all.filter((company) => passesFilters(company, 'unspecified', params)).length;
+        setSearchProgress({ cached: cached.companies.length, loaded: all.length, matching, target: requestedLimit, total: response.totalResults || null, page, running: hasMore, retry: null });
         page += 1;
       }
       await refreshCacheStats();
@@ -721,10 +772,21 @@ export default function App() {
         return;
       }
       exportCacheXlsx(filtered, mode);
+      if (mode === 'not_interested') {
+        const now = new Date().toISOString();
+        await Promise.all(filtered.map((company) => patchCompany(company.siren, {
+          prospection_status: 'processed',
+          prospection_reason: `Export XLSX — ${company.prospection_reason || 'Pas intéressée'}`,
+          prospection_updated_at: now,
+          processed_at: now,
+          exported_at: now,
+          exported_from_status: 'not_interested',
+        })));
+      }
     } catch (err) {
       setError(`Extraction du cache : ${err.message}`);
     }
-  }, []);
+  }, [patchCompany]);
 
   const handleCacheImport = useCallback(async (event) => {
     const file = event.target.files?.[0];
@@ -807,7 +869,8 @@ export default function App() {
 
         {searchProgress && (
           <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex flex-wrap items-center gap-3">
-            <span>{searchProgress.loaded} entreprises mémorisées{searchProgress.total ? ` sur ${searchProgress.total}` : ''} · page {searchProgress.page} · objectif max. {DATA_GOUV_SOFT_CAP.toLocaleString('fr-FR')}</span>
+            <span>{searchProgress.matching} correspondante{searchProgress.matching > 1 ? 's' : ''} sur {searchProgress.target} demandée{searchProgress.target > 1 ? 's' : ''} · {searchProgress.loaded} reçue{searchProgress.loaded > 1 ? 's' : ''} de Data.gouv{searchProgress.total ? ` sur ${searchProgress.total}` : ''} · page {searchProgress.page}</span>
+            {searchProgress.retry && <span className="text-amber-700">Data.gouv temporairement indisponible : nouvel essai de la page {searchProgress.retry.page} dans {Math.ceil(searchProgress.retry.delayMs / 1000)} s ({searchProgress.retry.attempt}/{DATA_GOUV_MAX_RETRIES}).</span>}
             {searching && <button type="button" onClick={stopSearch} className="ml-auto text-red-600 underline">Arrêter la recherche</button>}
           </div>
         )}
