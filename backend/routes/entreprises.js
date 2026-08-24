@@ -185,7 +185,9 @@ router.get('/search', async (req, res) => {
       };
     });
 
-    // Exclure les entreprises fermées
+    // La recherche peut cibler un établissement actif alors que le siège légal
+    // est fermé. On conserve ce retrait et le comptabilise pour le journal UI.
+    const excludedClosedHeadOffices = entreprises.filter((e) => e._etat !== 'A').length;
     entreprises = entreprises.filter((e) => e._etat === 'A');
     entreprises.forEach((e) => delete e._etat);
 
@@ -193,6 +195,7 @@ router.get('/search', async (req, res) => {
       total: entreprises.length,
       total_results: data.total_results ?? null,
       total_pages: data.total_pages ?? null,
+      excluded_closed_head_offices: excludedClosedHeadOffices,
       page: Number(data.page || page),
       has_more: data.total_pages ? Number(data.page || page) < Number(data.total_pages) : entreprises.length > 0,
       entreprises,

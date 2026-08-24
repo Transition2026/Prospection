@@ -249,6 +249,7 @@ export async function cacheSearchPage(signature, page, companies, metadata = {})
     exhausted: !metadata.hasMore,
     total_pages: metadata.totalPages ?? null,
     total_results: metadata.totalResults ?? null,
+    excluded_closed_head_offices: metadata.excludedClosedHeadOffices ?? null,
     updated_at: now,
   });
   await completed;

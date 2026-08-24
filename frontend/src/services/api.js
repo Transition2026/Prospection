@@ -38,6 +38,7 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
   let hasMore = false;
   let totalPages = 0;
   let totalResults = 0;
+  let excludedClosedHeadOffices = 0;
   let firstRequest = true;
 
   // La recherche exhaustive peut regrouper plusieurs départements ou secteurs.
@@ -56,6 +57,7 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
         hasMore = hasMore || Boolean(data.has_more);
         totalPages = Math.max(totalPages, Number(data.total_pages) || 0);
         totalResults += Number(data.total_results) || 0;
+        excludedClosedHeadOffices += Number(data.excluded_closed_head_offices) || 0;
       }
     }
   }
@@ -69,6 +71,7 @@ export async function searchEntreprises(params, page = 1, existingSirens = new S
     hasMore,
     totalPages,
     totalResults,
+    excludedClosedHeadOffices,
   };
 }
 

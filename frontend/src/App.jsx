@@ -187,19 +187,54 @@ function isTemporarilyClosed(company) {
     || company.places_result?.statut === 'CLOSED_TEMPORARILY';
 }
 
-function isInSearchedArea(company, params, filterLegalHeadquarters) {
+function matchesEstablishmentArea(company, params) {
   if (!params) return true;
   const establishmentPostalCode = company.code_postal_etablissement || '';
-  const headquartersPostalCode = company.code_postal_legal || company.code_postal || '';
   const postalCodes = [...new Set([...(params.code_postaux || []), params.code_postal].filter(Boolean))];
-  if (postalCodes.length) {
-    if (!postalCodes.includes(establishmentPostalCode)) return false;
-    return !filterLegalHeadquarters || postalCodes.includes(headquartersPostalCode);
-  }
+  if (postalCodes.length) return postalCodes.includes(establishmentPostalCode);
   const departements = params.departements || [];
   if (!departements.length) return true;
-  if (!departements.includes(establishmentPostalCode.slice(0, 2))) return false;
-  return !filterLegalHeadquarters || departements.includes(headquartersPostalCode.slice(0, 2));
+  return departements.includes(establishmentPostalCode.slice(0, 2));
+}
+
+function matchesLegalHeadquartersArea(company, params) {
+  if (!params) return true;
+  const headquartersPostalCode = company.code_postal_legal || company.code_postal || '';
+  const postalCodes = [...new Set([...(params.code_postaux || []), params.code_postal].filter(Boolean))];
+  if (postalCodes.length) return postalCodes.includes(headquartersPostalCode);
+  const departements = params.departements || [];
+  if (!departements.length) return true;
+  return departements.includes(headquartersPostalCode.slice(0, 2));
+}
+
+function isInSearchedArea(company, params, filterLegalHeadquarters) {
+  return matchesEstablishmentArea(company, params)
+    && (!filterLegalHeadquarters || matchesLegalHeadquartersArea(company, params));
+}
+
+function searchFilterReport(companies, params, { categoryFilter, excludeGroups, filterLegalHeadquarters }) {
+  let remaining = companies;
+  const steps = [];
+  const apply = (label, predicate) => {
+    const before = remaining.length;
+    remaining = remaining.filter(predicate);
+    steps.push({ label, removed: before - remaining.length, remaining: remaining.length });
+  };
+
+  apply('Décisions déjà prises', (company) => company.prospection_status === 'unspecified');
+  apply('Fermetures temporaires Google', (company) => !isTemporarilyClosed(company));
+  apply('Effectif nul ou inconnu', (company) => !ZERO_EMPLOYEE_CODES.has(company.tranche_effectif));
+  apply('Taille non sélectionnée', (company) => categoryFilter[company.categorie || categoryFromSize(company.tranche_effectif)]);
+  if (excludeGroups) apply('Groupes de plus de 35 établissements', (company) => company.nb_etablissements <= 35);
+  if (params?.nom_contient) apply('Nom ne correspondant pas', (company) => normalizedText(company.nom_entreprise).includes(normalizedText(params.nom_contient)));
+  const nafPrefixes = [...new Set([...(params?.naf_prefixes || []), params?.naf_prefix].filter(Boolean))]
+    .map(normalizedNaf)
+    .filter(Boolean);
+  if (nafPrefixes.length) apply('Code NAF hors sélection', (company) => nafPrefixes.some((prefix) => normalizedNaf(company.code_naf).startsWith(prefix)));
+  apply('Établissement hors zone recherchée', (company) => matchesEstablishmentArea(company, params));
+  if (filterLegalHeadquarters) apply('Siège légal hors zone recherchée', (company) => matchesLegalHeadquartersArea(company, params));
+
+  return { steps, matching: remaining.length };
 }
 
 function needsLeaderResolution(company) {
@@ -446,8 +481,12 @@ export default function App() {
       setCompanies(all);
       let page = cached.search.next_page || 1;
       let hasMore = !cached.search.exhausted;
-      let matching = all.filter((company) => passesFilters(company, 'unspecified', params)).length;
-      setSearchProgress({ cached: all.length, loaded: all.length, matching, target: requestedLimit, total: cached.search.total_results, page, running: hasMore, retry: null });
+      const cachedExcludedHeadOffices = cached.search.excluded_closed_head_offices;
+      let excludedClosedHeadOfficesKnown = Number.isFinite(cachedExcludedHeadOffices) || cached.companies.length === 0;
+      let excludedClosedHeadOffices = Number.isFinite(cachedExcludedHeadOffices) ? cachedExcludedHeadOffices : 0;
+      let filterReport = searchFilterReport(all, params, { categoryFilter, excludeGroups, filterLegalHeadquarters });
+      let matching = filterReport.matching;
+      setSearchProgress({ cached: all.length, loaded: all.length, matching, target: requestedLimit, total: cached.search.total_results, page, running: hasMore, exhausted: !hasMore, retry: null, excludedClosedHeadOffices, excludedClosedHeadOfficesKnown, filterReport });
 
       while (hasMore && !cancelSearchRef.current && matching < requestedLimit) {
         await sleep(170); // <= 6 pages/s, sous la limite Data.gouv de 7 req/s.
@@ -468,13 +507,20 @@ export default function App() {
           }
         }
         const fetched = response.entreprises.map(normalizeCompany);
-        await cacheSearchPage(signature, page, fetched, { hasMore: response.hasMore, totalPages: response.totalPages, totalResults: response.totalResults });
+        if (excludedClosedHeadOfficesKnown) excludedClosedHeadOffices += response.excludedClosedHeadOffices;
+        await cacheSearchPage(signature, page, fetched, {
+          hasMore: response.hasMore,
+          totalPages: response.totalPages,
+          totalResults: response.totalResults,
+          excludedClosedHeadOffices: excludedClosedHeadOfficesKnown ? excludedClosedHeadOffices : null,
+        });
         const hydrated = await hydrateCompanies(fetched);
         all = dedupe([...all, ...hydrated.map(normalizeCompany)]);
         setCompanies(all);
         hasMore = response.hasMore;
-        matching = all.filter((company) => passesFilters(company, 'unspecified', params)).length;
-        setSearchProgress({ cached: cached.companies.length, loaded: all.length, matching, target: requestedLimit, total: response.totalResults || null, page, running: hasMore, retry: null });
+        filterReport = searchFilterReport(all, params, { categoryFilter, excludeGroups, filterLegalHeadquarters });
+        matching = filterReport.matching;
+        setSearchProgress({ cached: cached.companies.length, loaded: all.length, matching, target: requestedLimit, total: response.totalResults || null, page, running: hasMore, exhausted: !hasMore, retry: null, excludedClosedHeadOffices, excludedClosedHeadOfficesKnown, filterReport });
         page += 1;
       }
       await refreshCacheStats();
@@ -484,7 +530,7 @@ export default function App() {
       setSearching(false);
       setSearchProgress((previous) => previous ? { ...previous, running: false } : null);
     }
-  }, [passesFilters, refreshCacheStats]);
+  }, [categoryFilter, excludeGroups, filterLegalHeadquarters, refreshCacheStats]);
 
   const stopSearch = useCallback(() => {
     cancelSearchRef.current = true;
@@ -873,6 +919,24 @@ export default function App() {
             {searchProgress.retry && <span className="text-amber-700">Data.gouv temporairement indisponible : nouvel essai de la page {searchProgress.retry.page} dans {Math.ceil(searchProgress.retry.delayMs / 1000)} s ({searchProgress.retry.attempt}/{DATA_GOUV_MAX_RETRIES}).</span>}
             {searching && <button type="button" onClick={stopSearch} className="ml-auto text-red-600 underline">Arrêter la recherche</button>}
           </div>
+        )}
+
+        {searchProgress?.filterReport && (
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="font-semibold text-slate-900">Journal de filtrage de la recherche</h2>
+              <span className="text-xs text-slate-500">{searchProgress.exhausted ? 'Résultats Data.gouv épuisés' : searchProgress.matching >= searchProgress.target ? 'Objectif atteint' : 'Recherche en cours'}</span>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              <span>Data.gouv annonce : <strong>{searchProgress.total?.toLocaleString('fr-FR') ?? '—'}</strong></span>
+              <span>Fiches reçues : <strong>{searchProgress.loaded.toLocaleString('fr-FR')}</strong></span>
+              {searchProgress.exhausted && Number.isFinite(searchProgress.total) && <span>Écart Data.gouv → fiches reçues : <strong>{Math.max(0, searchProgress.total - searchProgress.loaded).toLocaleString('fr-FR')}</strong></span>}
+              {searchProgress.excludedClosedHeadOfficesKnown && <span>Sièges légaux fermés écartés : <strong>{searchProgress.excludedClosedHeadOffices.toLocaleString('fr-FR')}</strong></span>}
+            </div>
+            <ul className="mt-3 grid gap-1 text-xs sm:grid-cols-2">
+              {searchProgress.filterReport.steps.map((step) => <li key={step.label}>{step.label} : <strong>-{step.removed.toLocaleString('fr-FR')}</strong> · reste {step.remaining.toLocaleString('fr-FR')}</li>)}
+            </ul>
+          </section>
         )}
 
         <section className="rounded-2xl border border-slate-200 bg-white p-4 text-sm">
