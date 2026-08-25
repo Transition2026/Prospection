@@ -1,6 +1,6 @@
 {
   "name": "appli-searchpdg",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "",
   "main": "desktop/main.js",
   "scripts": {
