@@ -58,7 +58,7 @@
       "provider": "github",
       "owner": "Transition2026",
       "repo": "Prospection",
-      "releaseType": "release"
+      "releaseType": "draft"
     }
   },
   "devDependencies": {
