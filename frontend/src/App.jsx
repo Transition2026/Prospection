@@ -4,6 +4,7 @@ import SearchForm from './components/SearchForm';
 import DetailPanel from './components/DetailPanel';
 import CompanyCards from './components/CompanyCards';
 import DesktopSettings from './components/DesktopSettings';
+import DesktopDiagnostics from './components/DesktopDiagnostics';
 import {
   checkStatus, enrichDropcontact, findRHContact, findWebsiteWithClaude, getApiUsage, RateLimitError,
   TransientApiError,
@@ -912,6 +913,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
         <StatusBanner status={apiStatus} />
         <DesktopSettings onSaved={() => checkStatus().then(setApiStatus).catch(() => setApiStatus({ ok: false, message: 'Backend indisponible.' }))} />
+        <DesktopDiagnostics />
         {error && <div className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
         <SearchForm onSearch={handleSearch} onCancel={stopSearch} loading={searching} categoryFilter={categoryFilter} onCategoryChange={setCategoryFilter} exclureGroupes={excludeGroups} onExclureGroupesChange={setExcludeGroups} filterLegalHeadquarters={filterLegalHeadquarters} onFilterLegalHeadquartersChange={setFilterLegalHeadquarters} cacheOnly={false} />
 
