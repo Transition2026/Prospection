@@ -15,7 +15,7 @@ import {
   getCacheStats, getCachedCompanies, getCachedSearch, hydrateCompanies, importCompanyCache,
   initializeCompanyCache, updateCachedCompany,
 } from './services/companyCache';
-import { exportCacheXlsx, exportInterestedXlsx } from './services/xlsxExport';
+import { buildOdooContactRows, exportCacheXlsx, exportContactsOdooXlsx, exportInterestedXlsx } from './services/xlsxExport';
 import { readCacheImportFile } from './services/xlsxCacheImport';
 
 const ZERO_EMPLOYEE_CODES = new Set(['NN', '00']);
@@ -806,9 +806,6 @@ export default function App() {
       const cached = await getCachedCompanies();
       const filtered = cached.filter((company) => {
         if (mode === 'enriched') return Boolean(company.enriched_at);
-        if (mode === 'enriched_with_email') {
-          return Boolean(company.enriched_at && (company.email || company.leader_email || company.contact_rh_email));
-        }
         if (mode === 'with_email') return Boolean(company.email || company.leader_email || company.contact_rh_email);
         if (mode === 'interested') return company.prospection_status === 'interested';
         if (mode === 'not_interested') return company.prospection_status === 'not_interested';
@@ -819,7 +816,13 @@ export default function App() {
         window.alert('Aucune fiche ne correspond à cette extraction du cache.');
         return;
       }
-      exportCacheXlsx(filtered, mode);
+      const contactsExported = mode === 'with_email'
+        ? exportContactsOdooXlsx(filtered)
+        : exportCacheXlsx(filtered, mode);
+      if (mode === 'with_email' && !contactsExported) {
+        window.alert('Aucun e-mail de contact exploitable à exporter.');
+        return;
+      }
       if (mode === 'not_interested') {
         const now = new Date().toISOString();
         await Promise.all(filtered.map((company) => patchCompany(company.siren, {
@@ -865,8 +868,14 @@ export default function App() {
   const exportableInterested = selectedInterested.filter((company) => Boolean(company.enriched_at));
   const handleInterestedExport = useCallback(async () => {
     if (!exportableInterested.length) return;
-    exportInterestedXlsx(exportableInterested);
-    await Promise.all(exportableInterested.map((company) => patchCompany(company.siren, {
+    const companiesWithContacts = exportableInterested
+      .filter((company) => buildOdooContactRows([company]).length > 0);
+    const contactsExported = exportInterestedXlsx(exportableInterested);
+    if (!contactsExported) {
+      window.alert('Aucun e-mail de contact exploitable à exporter.');
+      return;
+    }
+    await Promise.all(companiesWithContacts.map((company) => patchCompany(company.siren, {
       prospection_status: 'processed',
       prospection_reason: 'Export XLSX',
       prospection_updated_at: new Date().toISOString(),
@@ -898,8 +907,7 @@ export default function App() {
               <button type="button" onClick={() => handleCacheXlsxExport('interested')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Intéressées</button>
               <button type="button" onClick={() => handleCacheXlsxExport('not_interested')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Pas intéressées</button>
               <button type="button" onClick={() => handleCacheXlsxExport('enriched')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Enrichies</button>
-              <button type="button" onClick={() => handleCacheXlsxExport('enriched_with_email')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Enrichies avec email</button>
-              <button type="button" onClick={() => handleCacheXlsxExport('with_email')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Avec email</button>
+              <button type="button" onClick={() => handleCacheXlsxExport('with_email')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Contacts avec e-mail (Odoo)</button>
             </div>
             <div className="mt-3 flex flex-wrap gap-3 border-t border-blue-100 pt-3">
               <button type="button" onClick={handleCacheExport} className="text-blue-700 hover:underline">Sauvegarde JSON</button>
@@ -978,7 +986,7 @@ export default function App() {
             <span className="text-sm text-gray-500">{selectedInterested.length} sélectionnée{selectedInterested.length > 1 ? 's' : ''}</span>
             <button type="button" disabled={!selectedInterested.length || enriching} onClick={handleEnrich} className="ml-auto px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-200 text-white font-semibold text-sm">{enriching ? 'Enrichissement en cours…' : 'Enrichir la sélection'}</button>
             {enriching && <button type="button" onClick={stopEnrichment} className="rounded-xl border border-red-300 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-50">Arrêter</button>}
-            <button type="button" disabled={!exportableInterested.length || enriching} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">Exporter XLSX{exportableInterested.length ? ` (${exportableInterested.length})` : ''}</button>
+            <button type="button" disabled={!exportableInterested.length || enriching} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">Exporter contacts Odoo{exportableInterested.length ? ` (${exportableInterested.length})` : ''}</button>
           </section>
         )}
 
