@@ -19,6 +19,20 @@ function enseigneEtablissement(etablissement = {}) {
     || '';
 }
 
+// Les noms provenant de SIRENE sont fréquemment tout en majuscules et
+// contiennent parfois le nom de naissance entre parenthèses. On normalise
+// uniquement les personnes physiques : les dénominations sociales restent
+// strictement telles que renvoyées par la source.
+function formatNomPersonne(value) {
+  const cleaned = `${value || ''}`
+    .replace(/\s*\([^)]*\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  const lower = cleaned.toLocaleLowerCase('fr-FR');
+  return lower.charAt(0).toLocaleUpperCase('fr-FR') + lower.slice(1);
+}
+
 // `matching_etablissements` représente le lieu qui a motivé le résultat de
 // recherche Data.gouv. Il est plus utile à la prospection qu'un siège de groupe.
 function choisirEtablissementCible(entreprise = {}) {
@@ -79,8 +93,8 @@ async function remonterDirigeant(siren, visited = new Set(), depth = 0) {
   if (personnePhysique) {
     return {
       found: true,
-      prenom: personnePhysique.prenoms,
-      nom: personnePhysique.nom || '',
+      prenom: formatNomPersonne(personnePhysique.prenoms),
+      nom: formatNomPersonne(personnePhysique.nom),
       qualite: personnePhysique.qualite || '',
       remontees: depth,
     };
@@ -140,8 +154,8 @@ router.get('/search', async (req, res) => {
       const dirigeant = dirigeantsTries[0] || {};
       const etablissement = choisirEtablissementCible(e);
       const tousLesDirigeants = dirigeantsTries.map((d) => ({
-        prenoms: d.prenoms || '',
-        nom: d.nom || d.denomination || '',
+        prenoms: d.prenoms ? formatNomPersonne(d.prenoms) : '',
+        nom: d.prenoms ? formatNomPersonne(d.nom) : (d.nom || d.denomination || ''),
         qualite: d.qualite || '',
         siren: d.siren || '',
         date_naissance: d.annee_de_naissance ? `${d.annee_de_naissance}` : '',
@@ -152,8 +166,10 @@ router.get('/search', async (req, res) => {
         // La fiche source complète est gardée dans IndexedDB avec le résultat
         // normalisé, y compris si elle est ensuite masquée par un filtre UI.
         data_gouv_brut: e,
-        prenom_dirigeant: dirigeant.prenoms || '',
-        nom_dirigeant: dirigeant.nom || dirigeant.denomination || '',
+        prenom_dirigeant: dirigeant.prenoms ? formatNomPersonne(dirigeant.prenoms) : '',
+        nom_dirigeant: dirigeant.prenoms
+          ? formatNomPersonne(dirigeant.nom)
+          : (dirigeant.nom || dirigeant.denomination || ''),
         qualite_dirigeant: dirigeant.qualite || '',
         siren_dirigeant: dirigeant.siren || '',
         dirigeants: tousLesDirigeants,
