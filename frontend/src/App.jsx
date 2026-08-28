@@ -13,7 +13,7 @@ import {
 import {
   cacheSearchPage, clearCompanyCache, createSearchSignature, exportCompanyCache,
   getCacheStats, getCachedCompanies, getCachedSearch, hydrateCompanies, importCompanyCache,
-  initializeCompanyCache, updateCachedCompany,
+  initializeCompanyCache, updateCachedCompanies, updateCachedCompany,
 } from './services/companyCache';
 import { buildOdooContactRows, exportCacheXlsx, exportContactsOdooXlsx, exportInterestedXlsx } from './services/xlsxExport';
 import { readCacheImportFile } from './services/xlsxCacheImport';
@@ -332,6 +332,7 @@ export default function App() {
   const [searchProgress, setSearchProgress] = useState(null);
   const [error, setError] = useState(null);
   const [enriching, setEnriching] = useState(false);
+  const [exportingContacts, setExportingContacts] = useState(false);
   const [enrichment, setEnrichment] = useState(null);
   const [autoDeciding, setAutoDeciding] = useState(false);
   const [autoDecisionProgress, setAutoDecisionProgress] = useState(null);
@@ -867,23 +868,49 @@ export default function App() {
   const selectedInterested = interested.filter((company) => selected.has(company.siren));
   const exportableInterested = selectedInterested.filter((company) => Boolean(company.enriched_at));
   const handleInterestedExport = useCallback(async () => {
-    if (!exportableInterested.length) return;
-    const companiesWithContacts = exportableInterested
-      .filter((company) => buildOdooContactRows([company]).length > 0);
-    const contactsExported = exportInterestedXlsx(exportableInterested);
-    if (!contactsExported) {
-      window.alert('Aucun e-mail de contact exploitable à exporter.');
-      return;
+    if (!exportableInterested.length || exportingContacts) return;
+    let fileDownloaded = false;
+    setExportingContacts(true);
+    setError(null);
+    try {
+      const companiesWithContacts = exportableInterested
+        .filter((company) => buildOdooContactRows([company]).length > 0);
+      const contactsExported = exportInterestedXlsx(exportableInterested);
+      if (!contactsExported) {
+        window.alert('Aucun e-mail de contact exploitable à exporter.');
+        return;
+      }
+      fileDownloaded = true;
+      const now = new Date().toISOString();
+      const exportPatch = {
+        prospection_status: 'processed',
+        prospection_reason: 'Export XLSX',
+        prospection_updated_at: now,
+        processed_at: now,
+        exported_at: now,
+      };
+      await updateCachedCompanies(companiesWithContacts.map((company) => ({
+        siren: company.siren,
+        patch: exportPatch,
+      })));
+      const exportedSirens = new Set(companiesWithContacts.map((company) => company.siren));
+      setCompanies((previous) => previous.map((company) => (
+        exportedSirens.has(company.siren) ? { ...company, ...exportPatch } : company
+      )));
+      setSelectedCompany((previous) => (
+        previous && exportedSirens.has(previous.siren) ? { ...previous, ...exportPatch } : previous
+      ));
+      setSelected(new Set());
+      await refreshCacheStats();
+    } catch (err) {
+      const detail = err?.message || 'erreur inconnue';
+      setError(fileDownloaded
+        ? `Le fichier a été téléchargé, mais son suivi dans le cache a échoué : ${detail}`
+        : `Export des contacts impossible : ${detail}`);
+    } finally {
+      setExportingContacts(false);
     }
-    await Promise.all(companiesWithContacts.map((company) => patchCompany(company.siren, {
-      prospection_status: 'processed',
-      prospection_reason: 'Export XLSX',
-      prospection_updated_at: new Date().toISOString(),
-      processed_at: new Date().toISOString(),
-      exported_at: new Date().toISOString(),
-    })));
-    setSelected(new Set());
-  }, [exportableInterested, patchCompany]);
+  }, [exportableInterested, exportingContacts, refreshCacheStats]);
   return (
     <div className="min-h-screen bg-gray-50">
       <DetailPanel entreprise={selectedCompany} onClose={() => setSelectedCompany(null)} onUpdateEntreprise={patchCompany} />
@@ -986,7 +1013,7 @@ export default function App() {
             <span className="text-sm text-gray-500">{selectedInterested.length} sélectionnée{selectedInterested.length > 1 ? 's' : ''}</span>
             <button type="button" disabled={!selectedInterested.length || enriching} onClick={handleEnrich} className="ml-auto px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-200 text-white font-semibold text-sm">{enriching ? 'Enrichissement en cours…' : 'Enrichir la sélection'}</button>
             {enriching && <button type="button" onClick={stopEnrichment} className="rounded-xl border border-red-300 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-50">Arrêter</button>}
-            <button type="button" disabled={!exportableInterested.length || enriching} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">Exporter contacts Odoo{exportableInterested.length ? ` (${exportableInterested.length})` : ''}</button>
+            <button type="button" disabled={!exportableInterested.length || enriching || exportingContacts} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">{exportingContacts ? 'Exportation en cours…' : `Exporter contacts Odoo${exportableInterested.length ? ` (${exportableInterested.length})` : ''}`}</button>
           </section>
         )}
 

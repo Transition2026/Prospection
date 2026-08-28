@@ -280,20 +280,43 @@ export async function hydrateCompanies(companies) {
 
 export async function updateCachedCompany(siren, patch) {
   if (!siren) return null;
+  const [record] = await updateCachedCompanies([{ siren, patch }]);
+  return record || null;
+}
+
+// Les opérations de masse (notamment l'export de contacts) ne doivent pas
+// ouvrir une transaction IndexedDB par fiche. Une seule transaction évite de
+// saturer le renderer et garantit que les statuts sont enregistrés ensemble.
+export async function updateCachedCompanies(updates) {
+  const patchesBySiren = new Map();
+  (updates || []).forEach(({ siren, patch } = {}) => {
+    if (!siren || !patch || typeof patch !== 'object') return;
+    patchesBySiren.set(siren, {
+      ...(patchesBySiren.get(siren) || {}),
+      ...patch,
+    });
+  });
+  if (patchesBySiren.size === 0) return [];
+
   const db = await initializeCompanyCache();
   const transaction = db.transaction(STORES.companies, 'readwrite');
   const completed = transactionResult(transaction);
   const store = transaction.objectStore(STORES.companies);
-  const previous = await requestResult(store.get(siren));
-  const record = {
-    siren,
-    base: persistentCompany(previous?.base),
-    data: { ...persistentCompany(previous?.data), ...persistentCompany(patch) },
-    updated_at: isoNow(),
-  };
-  store.put(record);
+  const updatedAt = isoNow();
+  const records = [];
+  for (const [siren, patch] of patchesBySiren) {
+    const previous = await requestResult(store.get(siren));
+    const record = {
+      siren,
+      base: persistentCompany(previous?.base),
+      data: { ...persistentCompany(previous?.data), ...persistentCompany(patch) },
+      updated_at: updatedAt,
+    };
+    store.put(record);
+    records.push(record);
+  }
   await completed;
-  return record;
+  return records;
 }
 
 export async function getCacheStats() {
