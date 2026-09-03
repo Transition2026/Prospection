@@ -285,8 +285,9 @@ export async function updateCachedCompany(siren, patch) {
 }
 
 // Les opérations de masse (notamment l'export de contacts) ne doivent pas
-// ouvrir une transaction IndexedDB par fiche. Une seule transaction évite de
-// saturer le renderer et garantit que les statuts sont enregistrés ensemble.
+// attendre une lecture IndexedDB après l'autre. Toutes les lectures sont mises
+// en file immédiatement, puis chaque écriture est lancée depuis le callback de
+// sa lecture afin de garder la transaction active.
 export async function updateCachedCompanies(updates) {
   const patchesBySiren = new Map();
   (updates || []).forEach(({ siren, patch } = {}) => {
@@ -303,19 +304,28 @@ export async function updateCachedCompanies(updates) {
   const completed = transactionResult(transaction);
   const store = transaction.objectStore(STORES.companies);
   const updatedAt = isoNow();
-  const records = [];
-  for (const [siren, patch] of patchesBySiren) {
-    const previous = await requestResult(store.get(siren));
-    const record = {
-      siren,
-      base: persistentCompany(previous?.base),
-      data: { ...persistentCompany(previous?.data), ...persistentCompany(patch) },
-      updated_at: updatedAt,
+  const writes = [...patchesBySiren].map(([siren, patch]) => new Promise((resolve, reject) => {
+    const readRequest = store.get(siren);
+    readRequest.onerror = () => reject(readRequest.error);
+    readRequest.onsuccess = () => {
+      try {
+        const previous = readRequest.result;
+        const record = {
+          siren,
+          base: persistentCompany(previous?.base),
+          data: { ...persistentCompany(previous?.data), ...persistentCompany(patch) },
+          updated_at: updatedAt,
+        };
+        const writeRequest = store.put(record);
+        writeRequest.onerror = () => reject(writeRequest.error);
+        writeRequest.onsuccess = () => resolve(record);
+      } catch (error) {
+        reject(error);
+        transaction.abort();
+      }
     };
-    store.put(record);
-    records.push(record);
-  }
-  await completed;
+  }));
+  const [records] = await Promise.all([Promise.all(writes), completed]);
   return records;
 }
 
