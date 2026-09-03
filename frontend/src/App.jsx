@@ -28,6 +28,7 @@ const LEADER_RESOLVER_VERSION = 2;
 const PLACES_RESOLVER_VERSION = 4;
 const DATA_GOUV_SOFT_CAP = 10000;
 const DATA_GOUV_MAX_RETRIES = 3;
+const CONTACT_EXPORT_CACHE_BATCH_SIZE = 100;
 
 function abortError() {
   const error = new Error('Recherche annulée.');
@@ -333,6 +334,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [enriching, setEnriching] = useState(false);
   const [exportingContacts, setExportingContacts] = useState(false);
+  const [contactExportProgress, setContactExportProgress] = useState(null);
   const [enrichment, setEnrichment] = useState(null);
   const [autoDeciding, setAutoDeciding] = useState(false);
   const [autoDecisionProgress, setAutoDecisionProgress] = useState(null);
@@ -871,6 +873,7 @@ export default function App() {
     if (!exportableInterested.length || exportingContacts) return;
     let fileDownloaded = false;
     setExportingContacts(true);
+    setContactExportProgress(null);
     setError(null);
     try {
       const companiesWithContacts = exportableInterested
@@ -889,19 +892,31 @@ export default function App() {
         processed_at: now,
         exported_at: now,
       };
-      await updateCachedCompanies(companiesWithContacts.map((company) => ({
-        siren: company.siren,
-        patch: exportPatch,
-      })));
-      const exportedSirens = new Set(companiesWithContacts.map((company) => company.siren));
-      setCompanies((previous) => previous.map((company) => (
-        exportedSirens.has(company.siren) ? { ...company, ...exportPatch } : company
-      )));
-      setSelectedCompany((previous) => (
-        previous && exportedSirens.has(previous.siren) ? { ...previous, ...exportPatch } : previous
-      ));
+      setContactExportProgress({ completed: 0, total: companiesWithContacts.length });
+      for (let start = 0; start < companiesWithContacts.length; start += CONTACT_EXPORT_CACHE_BATCH_SIZE) {
+        const batch = companiesWithContacts.slice(start, start + CONTACT_EXPORT_CACHE_BATCH_SIZE);
+        await updateCachedCompanies(batch.map((company) => ({
+          siren: company.siren,
+          patch: exportPatch,
+        })));
+        const batchSirens = new Set(batch.map((company) => company.siren));
+        setCompanies((previous) => previous.map((company) => (
+          batchSirens.has(company.siren) ? { ...company, ...exportPatch } : company
+        )));
+        setSelectedCompany((previous) => (
+          previous && batchSirens.has(previous.siren) ? { ...previous, ...exportPatch } : previous
+        ));
+        setSelected((previous) => {
+          const remaining = new Set(previous);
+          batchSirens.forEach((siren) => remaining.delete(siren));
+          return remaining;
+        });
+        setContactExportProgress({
+          completed: Math.min(start + batch.length, companiesWithContacts.length),
+          total: companiesWithContacts.length,
+        });
+      }
       setSelected(new Set());
-      await refreshCacheStats();
     } catch (err) {
       const detail = err?.message || 'erreur inconnue';
       setError(fileDownloaded
@@ -909,8 +924,9 @@ export default function App() {
         : `Export des contacts impossible : ${detail}`);
     } finally {
       setExportingContacts(false);
+      setContactExportProgress(null);
     }
-  }, [exportableInterested, exportingContacts, refreshCacheStats]);
+  }, [exportableInterested, exportingContacts]);
   return (
     <div className="min-h-screen bg-gray-50">
       <DetailPanel entreprise={selectedCompany} onClose={() => setSelectedCompany(null)} onUpdateEntreprise={patchCompany} />
@@ -1013,7 +1029,7 @@ export default function App() {
             <span className="text-sm text-gray-500">{selectedInterested.length} sélectionnée{selectedInterested.length > 1 ? 's' : ''}</span>
             <button type="button" disabled={!selectedInterested.length || enriching} onClick={handleEnrich} className="ml-auto px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-blue-200 text-white font-semibold text-sm">{enriching ? 'Enrichissement en cours…' : 'Enrichir la sélection'}</button>
             {enriching && <button type="button" onClick={stopEnrichment} className="rounded-xl border border-red-300 px-4 py-2.5 text-sm font-semibold text-red-700 hover:bg-red-50">Arrêter</button>}
-            <button type="button" disabled={!exportableInterested.length || enriching || exportingContacts} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">{exportingContacts ? 'Exportation en cours…' : `Exporter contacts Odoo${exportableInterested.length ? ` (${exportableInterested.length})` : ''}`}</button>
+            <button type="button" disabled={!exportableInterested.length || enriching || exportingContacts} onClick={handleInterestedExport} className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-green-200 text-white font-semibold text-sm">{exportingContacts ? (contactExportProgress ? `Classement en traité… (${contactExportProgress.completed}/${contactExportProgress.total})` : 'Création du fichier…') : `Exporter contacts Odoo${exportableInterested.length ? ` (${exportableInterested.length})` : ''}`}</button>
           </section>
         )}
 
