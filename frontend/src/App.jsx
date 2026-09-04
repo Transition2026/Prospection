@@ -804,7 +804,50 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, []);
 
+  const trackExportedCompanies = useCallback(async (exportedCompanies) => {
+    if (!exportedCompanies.length) return;
+    const now = new Date().toISOString();
+    const exportPatch = {
+      prospection_status: 'processed',
+      prospection_reason: 'Export XLSX',
+      prospection_updated_at: now,
+      processed_at: now,
+      exported_at: now,
+    };
+    setContactExportProgress({ completed: 0, total: exportedCompanies.length });
+    for (let start = 0; start < exportedCompanies.length; start += CONTACT_EXPORT_CACHE_BATCH_SIZE) {
+      const batch = exportedCompanies.slice(start, start + CONTACT_EXPORT_CACHE_BATCH_SIZE);
+      await updateCachedCompanies(batch.map((company) => ({
+        siren: company.siren,
+        patch: exportPatch,
+      })));
+      const batchSirens = new Set(batch.map((company) => company.siren));
+      setCompanies((previous) => previous.map((company) => (
+        batchSirens.has(company.siren) ? { ...company, ...exportPatch } : company
+      )));
+      setSelectedCompany((previous) => (
+        previous && batchSirens.has(previous.siren) ? { ...previous, ...exportPatch } : previous
+      ));
+      setSelected((previous) => {
+        const remaining = new Set(previous);
+        batchSirens.forEach((siren) => remaining.delete(siren));
+        return remaining;
+      });
+      setContactExportProgress({
+        completed: Math.min(start + batch.length, exportedCompanies.length),
+        total: exportedCompanies.length,
+      });
+    }
+  }, []);
+
   const handleCacheXlsxExport = useCallback(async (mode) => {
+    const tracksInterestedContacts = mode === 'with_email';
+    if (tracksInterestedContacts && exportingContacts) return;
+    let fileDownloaded = false;
+    if (tracksInterestedContacts) {
+      setExportingContacts(true);
+      setContactExportProgress(null);
+    }
     try {
       const cached = await getCachedCompanies();
       const filtered = cached.filter((company) => {
@@ -826,6 +869,14 @@ export default function App() {
         window.alert('Aucun e-mail de contact exploitable à exporter.');
         return;
       }
+      if (mode === 'with_email') {
+        fileDownloaded = true;
+        const exportedInterested = filtered.filter((company) => (
+          company.prospection_status === 'interested'
+          && buildOdooContactRows([company]).length > 0
+        ));
+        await trackExportedCompanies(exportedInterested);
+      }
       if (mode === 'not_interested') {
         const now = new Date().toISOString();
         await Promise.all(filtered.map((company) => patchCompany(company.siren, {
@@ -838,9 +889,17 @@ export default function App() {
         })));
       }
     } catch (err) {
-      setError(`Extraction du cache : ${err.message}`);
+      const detail = err?.message || 'erreur inconnue';
+      setError(fileDownloaded
+        ? `Le fichier a été téléchargé, mais son suivi dans le cache a échoué : ${detail}`
+        : `Extraction du cache : ${detail}`);
+    } finally {
+      if (tracksInterestedContacts) {
+        setExportingContacts(false);
+        setContactExportProgress(null);
+      }
     }
-  }, [patchCompany]);
+  }, [exportingContacts, patchCompany, trackExportedCompanies]);
 
   const handleCacheImport = useCallback(async (event) => {
     const file = event.target.files?.[0];
@@ -884,38 +943,7 @@ export default function App() {
         return;
       }
       fileDownloaded = true;
-      const now = new Date().toISOString();
-      const exportPatch = {
-        prospection_status: 'processed',
-        prospection_reason: 'Export XLSX',
-        prospection_updated_at: now,
-        processed_at: now,
-        exported_at: now,
-      };
-      setContactExportProgress({ completed: 0, total: companiesWithContacts.length });
-      for (let start = 0; start < companiesWithContacts.length; start += CONTACT_EXPORT_CACHE_BATCH_SIZE) {
-        const batch = companiesWithContacts.slice(start, start + CONTACT_EXPORT_CACHE_BATCH_SIZE);
-        await updateCachedCompanies(batch.map((company) => ({
-          siren: company.siren,
-          patch: exportPatch,
-        })));
-        const batchSirens = new Set(batch.map((company) => company.siren));
-        setCompanies((previous) => previous.map((company) => (
-          batchSirens.has(company.siren) ? { ...company, ...exportPatch } : company
-        )));
-        setSelectedCompany((previous) => (
-          previous && batchSirens.has(previous.siren) ? { ...previous, ...exportPatch } : previous
-        ));
-        setSelected((previous) => {
-          const remaining = new Set(previous);
-          batchSirens.forEach((siren) => remaining.delete(siren));
-          return remaining;
-        });
-        setContactExportProgress({
-          completed: Math.min(start + batch.length, companiesWithContacts.length),
-          total: companiesWithContacts.length,
-        });
-      }
+      await trackExportedCompanies(companiesWithContacts);
       setSelected(new Set());
     } catch (err) {
       const detail = err?.message || 'erreur inconnue';
@@ -926,7 +954,7 @@ export default function App() {
       setExportingContacts(false);
       setContactExportProgress(null);
     }
-  }, [exportableInterested, exportingContacts]);
+  }, [exportableInterested, exportingContacts, trackExportedCompanies]);
   return (
     <div className="min-h-screen bg-gray-50">
       <DetailPanel entreprise={selectedCompany} onClose={() => setSelectedCompany(null)} onUpdateEntreprise={patchCompany} />
@@ -950,7 +978,7 @@ export default function App() {
               <button type="button" onClick={() => handleCacheXlsxExport('interested')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Intéressées</button>
               <button type="button" onClick={() => handleCacheXlsxExport('not_interested')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Pas intéressées</button>
               <button type="button" onClick={() => handleCacheXlsxExport('enriched')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Enrichies</button>
-              <button type="button" onClick={() => handleCacheXlsxExport('with_email')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100">Contacts avec e-mail (Odoo)</button>
+              <button type="button" disabled={exportingContacts} onClick={() => handleCacheXlsxExport('with_email')} className="rounded-lg bg-white px-2.5 py-1.5 text-blue-700 shadow-sm hover:bg-blue-100 disabled:bg-blue-100 disabled:text-blue-400">{exportingContacts ? (contactExportProgress ? `Classement en traité… (${contactExportProgress.completed}/${contactExportProgress.total})` : 'Création du fichier…') : 'Contacts avec e-mail (Odoo)'}</button>
             </div>
             <div className="mt-3 flex flex-wrap gap-3 border-t border-blue-100 pt-3">
               <button type="button" onClick={handleCacheExport} className="text-blue-700 hover:underline">Sauvegarde JSON</button>
