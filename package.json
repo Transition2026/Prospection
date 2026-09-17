@@ -1,6 +1,6 @@
 {
   "name": "appli-searchpdg",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "",
   "main": "desktop/main.js",
   "scripts": {
@@ -8,7 +8,8 @@
     "desktop:dev": "npm run build --prefix frontend && electron .",
     "desktop:dist": "npm run build --prefix frontend && electron-builder --win nsis --x64 --publish never",
     "desktop:publish": "npm run build --prefix frontend && electron-builder --win nsis --x64 --publish always",
-    "desktop:portable": "npm run build --prefix frontend && electron-builder --win portable --x64"
+    "desktop:portable": "npm run build --prefix frontend && electron-builder --win portable --x64",
+    "test:cache": "node --test frontend/tests/prospectionProcessing.test.mjs"
   },
   "keywords": [],
   "author": "",

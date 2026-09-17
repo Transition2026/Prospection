@@ -120,6 +120,7 @@ L'application est un outil de prospection B2B qui permet de :
 - **Récupérer l'email et le téléphone** du dirigeant via Dropcontact
 - **Exclure les entreprises déjà contactées** grâce à l'historique en base de données
 - **Exporter en CSV** pour Excel
+- **Réconcilier le cache local** via `Cache` → `Fix cache` : les fiches enrichies ou marquées « Pas intéressées » sont classées comme traitées, sans être déclarées exportées.
 
 ---
 
